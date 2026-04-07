@@ -683,6 +683,9 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
     fi
 
 RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system "transformers==5.4.0"
+
+RUN --mount=type=cache,target=/root/.cache/uv \
 . /etc/environment && \
 uv pip list
 
