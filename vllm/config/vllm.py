@@ -66,7 +66,7 @@ logger = init_logger(__name__)
 DEFAULT_V2_MODEL_RUNNER_WHITELIST = frozenset(
     {
         "Qwen/Qwen3-0.6B",
-        "facebook/opt-125m",
+        # "facebook/opt-125m",  # a lot of unit tests assert v1 specific feature
     }
 )
 
