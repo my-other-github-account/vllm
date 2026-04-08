@@ -10,6 +10,7 @@ import pydantic
 import pytest
 from pydantic import ValidationError
 
+import vllm.envs as envs
 from vllm.compilation.backends import VllmBackend
 from vllm.config import (
     CompilationConfig,
@@ -43,6 +44,23 @@ def test_compile_config_repr_succeeds():
     val = repr(config)
     assert "VllmConfig" in val
     assert "inductor_passes" in val
+
+
+@pytest.mark.parametrize(
+    ("env_value", "expected"),
+    [
+        (None, None),
+        ("0", False),
+        ("1", True),
+    ],
+)
+def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
+    if env_value is None:
+        monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+    else:
+        monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", env_value)
+
+    assert envs.VLLM_USE_V2_MODEL_RUNNER is expected
 
 
 def test_async_scheduling_with_pipeline_parallelism_is_allowed():

@@ -63,6 +63,13 @@ else:
 
 logger = init_logger(__name__)
 
+DEFAULT_V2_MODEL_RUNNER_WHITELIST = frozenset(
+    {
+        "Qwen/Qwen3-0.6B",
+        "facebook/opt-125m",
+    }
+)
+
 
 class OptimizationLevel(IntEnum):
     """Optimization level enum."""
@@ -457,6 +464,17 @@ class VllmConfig:
         ):
             return self.speculative_config.num_speculative_tokens
         return 0
+
+    @property
+    def use_v2_model_runner(self) -> bool:
+        use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
+        if use_v2_model_runner is not None:
+            return use_v2_model_runner
+
+        return (
+            self.model_config is not None
+            and self.model_config.model in DEFAULT_V2_MODEL_RUNNER_WHITELIST
+        )
 
     @property
     def needs_dp_coordinator(self) -> bool:
@@ -1106,7 +1124,7 @@ class VllmConfig:
             )
         current_platform.check_and_update_config(self)
 
-        if envs.VLLM_USE_V2_MODEL_RUNNER:
+        if self.use_v2_model_runner:
             self._validate_v2_model_runner()
 
         # Re-compute compile ranges after platform-specific config updates
