@@ -76,6 +76,7 @@ class InputBatch:
 
     # Whether any requests in batch use structured output.
     has_structured_output_reqs: bool
+    is_prefilling: torch.Tensor | None = None
 
     @classmethod
     def make_dummy(
@@ -143,6 +144,7 @@ class InputBatch:
             cu_num_logits=cu_num_logits,
             cu_num_logits_np=cu_num_logits_np,
             has_structured_output_reqs=False,
+            is_prefilling=torch.zeros(num_reqs, dtype=torch.bool),
         )
 
 

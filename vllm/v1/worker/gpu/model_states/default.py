@@ -186,5 +186,6 @@ class DefaultModelState(ModelState):
             slot_mappings=slot_mappings,
             kv_cache_config=kv_cache_config,
             dcp_local_seq_lens=input_batch.dcp_local_seq_lens,
+            is_prefilling=input_batch.is_prefilling,
         )
         return attn_metadata

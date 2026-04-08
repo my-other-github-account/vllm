@@ -751,6 +751,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.input_buffers.seq_lens,
         )
         seq_lens = self.input_buffers.seq_lens[:num_reqs_padded]
+        is_prefilling = torch.zeros(num_reqs_padded, dtype=torch.bool)
+        is_prefilling[:num_reqs] = torch.as_tensor(
+            self.req_states.num_computed_prefill_tokens[idx_mapping_np]
+            < self.req_states.prefill_len.np[idx_mapping_np]
+        )
 
         dcp_local_seq_lens = None
         if self.use_dcp:
@@ -801,6 +806,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cu_num_logits=cu_num_logits,
             cu_num_logits_np=cu_num_logits_np,
             has_structured_output_reqs=scheduler_output.has_structured_output_requests,
+            is_prefilling=is_prefilling,
         )
 
     def prepare_attn(

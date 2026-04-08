@@ -195,10 +195,13 @@ def build_attn_metadata(
     kv_cache_config: KVCacheConfig,
     dcp_local_seq_lens: torch.Tensor | None = None,
     encoder_seq_lens: dict[int, tuple[torch.Tensor, np.ndarray]] | None = None,
+    is_prefilling: torch.Tensor | None = None,
 ) -> dict[str, Any]:
     seq_lens = seq_lens[:num_reqs]
     if dcp_local_seq_lens is not None:
         dcp_local_seq_lens = dcp_local_seq_lens[:num_reqs]
+    if is_prefilling is not None:
+        is_prefilling = is_prefilling[:num_reqs]
 
     attn_metadata: dict[str, Any] = {}
     num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
@@ -218,6 +221,7 @@ def build_attn_metadata(
             slot_mapping=slot_mapping,
             causal=True,
             dcp_local_seq_lens=dcp_local_seq_lens,
+            is_prefilling=is_prefilling,
         )
         if encoder_seq_lens and i in encoder_seq_lens:
             encoder_seq_lens_gpu, encoder_seq_lens_cpu = encoder_seq_lens[i]
