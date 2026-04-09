@@ -171,6 +171,7 @@ def test_with_ngram_gpu_spec_decoding(monkeypatch: pytest.MonkeyPatch):
         "prompt_lookup_max": 3,
         "prompt_lookup_min": 2,
     }
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
 
     # Test configurations covering various scenarios
     # test_preemption, executor, async_scheduling,
