@@ -2,11 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import random
 from typing import TYPE_CHECKING
+from unittest.mock import MagicMock
 
 import pytest
 
 from vllm import LLM
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.metrics.reader import Counter, Gauge, Histogram, Metric, Vector
 
 if TYPE_CHECKING:
@@ -102,6 +104,36 @@ def _get_test_sampling_params(
         )
         for n in n_list
     ], n_list
+
+
+def test_llm_engine_sleep_state_cache():
+    llm_engine = object.__new__(LLMEngine)
+    llm_engine.multiprocess_mode = True
+    llm_engine._is_sleeping = False
+    llm_engine.engine_core = MagicMock()
+    llm_engine.logger_manager = None
+
+    assert llm_engine.is_sleeping() is False
+    llm_engine.engine_core.is_sleeping.assert_not_called()
+
+    llm_engine.sleep(level=0, mode="keep")
+    llm_engine.engine_core.sleep.assert_called_once_with(0, "keep")
+    assert llm_engine.is_sleeping() is True
+    llm_engine.engine_core.is_sleeping.assert_not_called()
+
+    llm_engine.wake_up(["scheduling"])
+    llm_engine.engine_core.wake_up.assert_called_once_with(["scheduling"])
+    assert llm_engine.is_sleeping() is False
+    llm_engine.engine_core.is_sleeping.assert_not_called()
+
+    llm_engine = object.__new__(LLMEngine)
+    llm_engine.multiprocess_mode = False
+    llm_engine._is_sleeping = False
+    llm_engine.engine_core = MagicMock()
+    llm_engine.engine_core.is_sleeping.return_value = True
+
+    assert llm_engine.is_sleeping() is True
+    llm_engine.engine_core.is_sleeping.assert_called_once_with()
 
 
 def test_compatibility_with_skip_tokenizer_init(
