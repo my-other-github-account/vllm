@@ -86,6 +86,8 @@ class LLMEngine:
             self.dp_group = parallel_config.stateless_init_dp_group()
         else:
             self.dp_group = None
+        self.multiprocess_mode = multiprocess_mode
+        self._is_sleeping = False
         self.should_execute_dummy_batch = False
 
         self.renderer = renderer = renderer_from_config(self.vllm_config)
@@ -352,17 +354,21 @@ class LLMEngine:
 
     def sleep(self, level: int = 1, mode: PauseMode = "abort"):
         self.engine_core.sleep(level, mode)
+        self._is_sleeping = True
 
         if self.logger_manager is not None:
             self.logger_manager.record_sleep_state(1, level)
 
     def wake_up(self, tags: list[str] | None = None):
         self.engine_core.wake_up(tags)
+        self._is_sleeping = False
 
         if self.logger_manager is not None:
             self.logger_manager.record_sleep_state(0, 0)
 
     def is_sleeping(self) -> bool:
+        if self.multiprocess_mode:
+            return self._is_sleeping
         return self.engine_core.is_sleeping()
 
     def get_metrics(self) -> list[Metric]:
