@@ -87,7 +87,7 @@ class LLMEngine:
         else:
             self.dp_group = None
         self.multiprocess_mode = multiprocess_mode
-        self._is_sleeping = False
+        self._sleeping_tags: set[str] = set()
         self.should_execute_dummy_batch = False
 
         self.renderer = renderer = renderer_from_config(self.vllm_config)
@@ -354,21 +354,29 @@ class LLMEngine:
 
     def sleep(self, level: int = 1, mode: PauseMode = "abort"):
         self.engine_core.sleep(level, mode)
-        self._is_sleeping = True
+        self._sleeping_tags.add("scheduling")
+        if level >= 1 and self._sleeping_tags == {"scheduling"}:
+            self._sleeping_tags.update({"weights", "kv_cache"})
 
         if self.logger_manager is not None:
             self.logger_manager.record_sleep_state(1, level)
 
     def wake_up(self, tags: list[str] | None = None):
         self.engine_core.wake_up(tags)
-        self._is_sleeping = False
+        self._sleeping_tags.discard("scheduling")
+        if tags is None:
+            self._sleeping_tags.clear()
+        else:
+            self._sleeping_tags.difference_update(
+                tag for tag in tags if tag != "scheduling"
+            )
 
         if self.logger_manager is not None:
             self.logger_manager.record_sleep_state(0, 0)
 
     def is_sleeping(self) -> bool:
         if self.multiprocess_mode:
-            return self._is_sleeping
+            return bool(self._sleeping_tags)
         return self.engine_core.is_sleeping()
 
     def get_metrics(self) -> list[Metric]:

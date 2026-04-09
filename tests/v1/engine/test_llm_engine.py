@@ -109,7 +109,7 @@ def _get_test_sampling_params(
 def test_llm_engine_sleep_state_cache():
     llm_engine = object.__new__(LLMEngine)
     llm_engine.multiprocess_mode = True
-    llm_engine._is_sleeping = False
+    llm_engine._sleeping_tags = set()
     llm_engine.engine_core = MagicMock()
     llm_engine.logger_manager = None
 
@@ -119,16 +119,35 @@ def test_llm_engine_sleep_state_cache():
     llm_engine.sleep(level=0, mode="keep")
     llm_engine.engine_core.sleep.assert_called_once_with(0, "keep")
     assert llm_engine.is_sleeping() is True
+    assert llm_engine._sleeping_tags == {"scheduling"}
     llm_engine.engine_core.is_sleeping.assert_not_called()
 
     llm_engine.wake_up(["scheduling"])
     llm_engine.engine_core.wake_up.assert_called_once_with(["scheduling"])
     assert llm_engine.is_sleeping() is False
+    assert llm_engine._sleeping_tags == set()
+    llm_engine.engine_core.is_sleeping.assert_not_called()
+
+    llm_engine.sleep(level=1, mode="keep")
+    assert llm_engine.is_sleeping() is True
+    assert llm_engine._sleeping_tags == {"scheduling", "weights", "kv_cache"}
+
+    llm_engine.wake_up(["scheduling"])
+    assert llm_engine.is_sleeping() is True
+    assert llm_engine._sleeping_tags == {"weights", "kv_cache"}
+
+    llm_engine.wake_up(["weights"])
+    assert llm_engine.is_sleeping() is True
+    assert llm_engine._sleeping_tags == {"kv_cache"}
+
+    llm_engine.wake_up(["kv_cache"])
+    assert llm_engine.is_sleeping() is False
+    assert llm_engine._sleeping_tags == set()
     llm_engine.engine_core.is_sleeping.assert_not_called()
 
     llm_engine = object.__new__(LLMEngine)
     llm_engine.multiprocess_mode = False
-    llm_engine._is_sleeping = False
+    llm_engine._sleeping_tags = set()
     llm_engine.engine_core = MagicMock()
     llm_engine.engine_core.is_sleeping.return_value = True
 
