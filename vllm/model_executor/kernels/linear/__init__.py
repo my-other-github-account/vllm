@@ -201,6 +201,9 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
         AiterInt8ScaledMMLinearKernel,
         AiterFp8BlockScaledMMKernel,
     },
+    "machete": {
+        MacheteLinearKernel,
+    },
     "fbgemm": {
         FbgemmNvFp4LinearKernel,
     },
@@ -707,39 +710,43 @@ def init_nvfp4_linear_kernel() -> NvFp4LinearKernel:
     current platform."""
     config = NvFp4LinearLayerConfig()
 
-    # Deprecated env-var overrides — still honoured but will be removed in
-    # v0.21.  Users should migrate to --linear-backend.
+    # Deprecated env-var overrides — only honoured when --linear-backend is
+    # "auto".  Will be removed in v0.21; users should migrate to
+    # --linear-backend.
     force_kernel: type[NvFp4LinearKernel] | None = None
-    if envs.VLLM_USE_FBGEMM:
-        warnings.warn(
-            "VLLM_USE_FBGEMM is deprecated and will be removed in v0.21. "
-            "Use --linear-backend instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        force_kernel = FbgemmNvFp4LinearKernel
-    elif envs.VLLM_USE_NVFP4_CT_EMULATIONS:
-        warnings.warn(
-            "VLLM_USE_NVFP4_CT_EMULATIONS is deprecated and will be "
-            "removed in v0.21. Use --linear-backend instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        force_kernel = EmulationNvFp4LinearKernel
-    elif envs.VLLM_NVFP4_GEMM_BACKEND is not None:
-        warnings.warn(
-            "VLLM_NVFP4_GEMM_BACKEND is deprecated and will be removed "
-            "in v0.21. Use --linear-backend instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        backend_name = envs.VLLM_NVFP4_GEMM_BACKEND
-        force_kernel = _NVFP4_BACKEND_TO_KERNEL.get(backend_name)
-        if force_kernel is None:
-            raise ValueError(
-                f"Unknown VLLM_NVFP4_GEMM_BACKEND={backend_name!r}. "
-                f"Valid choices: {list(_NVFP4_BACKEND_TO_KERNEL.keys())}"
+    linear_backend = _get_linear_backend()
+    if linear_backend == "auto":
+        if envs.VLLM_USE_FBGEMM:
+            warnings.warn(
+                "VLLM_USE_FBGEMM is deprecated and will be removed in "
+                "v0.21. Use --linear-backend fbgemm instead.",
+                DeprecationWarning,
+                stacklevel=2,
             )
+            force_kernel = FbgemmNvFp4LinearKernel
+        elif envs.VLLM_USE_NVFP4_CT_EMULATIONS:
+            warnings.warn(
+                "VLLM_USE_NVFP4_CT_EMULATIONS is deprecated and will be "
+                "removed in v0.21. Use --linear-backend emulation instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            force_kernel = EmulationNvFp4LinearKernel
+        elif envs.VLLM_NVFP4_GEMM_BACKEND is not None:
+            warnings.warn(
+                "VLLM_NVFP4_GEMM_BACKEND is deprecated and will be "
+                "removed in v0.21. Use --linear-backend instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            backend_name = envs.VLLM_NVFP4_GEMM_BACKEND
+            force_kernel = _NVFP4_BACKEND_TO_KERNEL.get(backend_name)
+            if force_kernel is None:
+                raise ValueError(
+                    f"Unknown VLLM_NVFP4_GEMM_BACKEND={backend_name!r}. "
+                    f"Valid choices: "
+                    f"{list(_NVFP4_BACKEND_TO_KERNEL.keys())}"
+                )
 
     if force_kernel is not None:
         is_supported, reason = force_kernel.is_supported()
@@ -751,12 +758,11 @@ def init_nvfp4_linear_kernel() -> NvFp4LinearKernel:
         logger.info_once("Using %s for NVFP4 GEMM", force_kernel.__name__)
         return force_kernel(config)
 
-    # Auto-select from registry.
+    # Auto-select from registry (or --linear-backend filtered).
     platform = current_platform._enum
     possible = list(_POSSIBLE_NVFP4_KERNELS.get(platform, []))
 
     # Apply --linear-backend filtering when set.
-    linear_backend = _get_linear_backend()
     if linear_backend != "auto":
         filtered = _filter_kernels_by_backend(linear_backend, possible)
         if not filtered:
