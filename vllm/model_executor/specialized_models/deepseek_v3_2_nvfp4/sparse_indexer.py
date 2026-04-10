@@ -5,13 +5,20 @@
 import torch
 
 import vllm.envs as envs
-from vllm import _custom_ops as ops
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import fp8_mqa_logits, fp8_paged_mqa_logits
-from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
+from vllm.v1.attention.backends.mla.indexer import (
+    DeepseekV32IndexerMetadata,
+)
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.worker.workspace import current_workspace_manager
+
+if current_platform.is_cuda_alike():
+    from vllm import _custom_ops as ops
+elif current_platform.is_xpu():
+    from vllm._xpu_ops import xpu_ops as ops
 
 logger = init_logger(__name__)
 
@@ -28,10 +35,10 @@ def sparse_attn_indexer(
     max_model_len: int,
     total_seq_lens: int,
     topk_indices_buffer: torch.Tensor,
-) -> None:
+) -> torch.Tensor:
     # careful! this will be None in dummy run
     attn_metadata = get_forward_context().attn_metadata
-    fp8_dtype = torch.float8_e4m3fn
+    fp8_dtype = current_platform.fp8_dtype()
 
     # assert isinstance(attn_metadata, dict)
     if not isinstance(attn_metadata, dict):
@@ -48,7 +55,6 @@ def sparse_attn_indexer(
         _ = torch.empty(max_logits_elems, dtype=torch.uint8, device=q_fp8.device)
         return None
 
-    assert isinstance(attn_metadata, dict)
     attn_metadata = attn_metadata[k_cache_prefix]
     assert isinstance(attn_metadata, DeepseekV32IndexerMetadata)
     has_decode = attn_metadata.num_decodes > 0
@@ -92,16 +98,28 @@ def sparse_attn_indexer(
                 chunk.token_start : chunk.token_end, :topk_tokens
             ]
 
-            torch.ops._C.top_k_per_row_prefill(
-                logits,
-                chunk.cu_seqlen_ks,
-                chunk.cu_seqlen_ke,
-                topk_indices,
-                num_rows,
-                logits.stride(0),
-                logits.stride(1),
-                topk_tokens,
-            )
+            if current_platform.is_xpu():
+                ops.top_k_per_row_prefill(
+                    logits,
+                    chunk.cu_seqlen_ks,
+                    chunk.cu_seqlen_ke,
+                    topk_indices,
+                    num_rows,
+                    logits.stride(0),
+                    logits.stride(1),
+                    topk_tokens,
+                )
+            else:
+                torch.ops._C.top_k_per_row_prefill(
+                    logits,
+                    chunk.cu_seqlen_ks,
+                    chunk.cu_seqlen_ke,
+                    topk_indices,
+                    num_rows,
+                    logits.stride(0),
+                    logits.stride(1),
+                    topk_tokens,
+                )
 
     if has_decode:
         decode_metadata = attn_metadata.decode
@@ -126,13 +144,15 @@ def sparse_attn_indexer(
         # TODO: move and optimize below logic with triton kernels
         batch_size = padded_q_fp8_decode_tokens.shape[0]
         next_n = padded_q_fp8_decode_tokens.shape[1]
-        assert batch_size == decode_metadata.seq_lens.shape[0]
         num_padded_tokens = batch_size * next_n
+        seq_lens = decode_metadata.seq_lens[:batch_size]
+        # seq_lens is (B, next_n) for native spec decode, (B,) otherwise.
+        # fp8_paged_mqa_logits and all topk kernels accept both shapes.
         logits = fp8_paged_mqa_logits(
             padded_q_fp8_decode_tokens,
             kv_cache,
             weights[:num_padded_tokens],
-            decode_metadata.seq_lens,
+            seq_lens,
             decode_metadata.block_table,
             decode_metadata.schedule_metadata,
             max_model_len=max_model_len,
@@ -141,29 +161,42 @@ def sparse_attn_indexer(
         num_rows = logits.shape[0]
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
 
-        if next_n == 1:
-            lengths = decode_metadata.seq_lens
+        if current_platform.is_cuda():
+            workspace_manager = current_workspace_manager()
+            (topk_workspace,) = workspace_manager.get_simultaneous(
+                ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
+            )
+            torch.ops._C.persistent_topk(
+                logits,
+                decode_metadata.seq_lens,
+                topk_indices,
+                topk_workspace,
+                topk_tokens,
+                attn_metadata.max_seq_len,
+            )
         else:
-            # (bs,) -> (bs, 1) + (next_n,) -> (bs, next_n) -> (bs * next_n,)
-            lengths = (
-                decode_metadata.seq_lens.unsqueeze(1)
-                - next_n
-                + 1
-                + decode_metadata.offsets
-            ).flatten()
-
-        workspace_manager = current_workspace_manager()
-        (topk_workspace,) = workspace_manager.get_simultaneous(
-            ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
-        )
-        torch.ops._C.persistent_topk(
-            logits,
-            lengths,
-            topk_indices,
-            topk_workspace,
-            topk_tokens,
-            attn_metadata.max_seq_len,
-        )
+            if current_platform.is_xpu():
+                ops.top_k_per_row_decode(
+                    logits,
+                    next_n,
+                    seq_lens,
+                    topk_indices,
+                    num_rows,
+                    logits.stride(0),
+                    logits.stride(1),
+                    topk_tokens,
+                )
+            else:
+                torch.ops._C.top_k_per_row_decode(
+                    logits,
+                    next_n,
+                    seq_lens,
+                    topk_indices,
+                    num_rows,
+                    logits.stride(0),
+                    logits.stride(1),
+                    topk_tokens,
+                )
 
         if decode_metadata.requires_padding:
             # if padded, we need to unpack
