@@ -51,7 +51,7 @@ def sparse_attn_indexer(
         _ = torch.empty(max_logits_elems, dtype=torch.uint8, device=q_fp8.device)
         return None
 
-    attn_metadata = attn_metadata[k_cache_prefix]
+    attn_metadata = attn_metadata[k_cache_prefix]  # type: ignore[assignment]
     assert isinstance(attn_metadata, DeepseekV32IndexerMetadata)
     has_decode = attn_metadata.num_decodes > 0
     has_prefill = attn_metadata.num_prefills > 0
