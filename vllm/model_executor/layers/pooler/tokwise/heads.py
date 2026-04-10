@@ -12,7 +12,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.tasks import PoolingTask
 from vllm.v1.pool.metadata import PoolingMetadata
 
-from .methods import TokenPoolingMethodOutputItem
+from .methods import RaggedTokenBatch, TokenPoolingMethodOutputItem
 
 TokenPoolerHeadOutputItem: TypeAlias = torch.Tensor | None
 
@@ -66,17 +66,48 @@ class TokenEmbeddingPoolerHead(TokenPoolerHead):
         if pooled_data is None:
             return None
 
+        embeddings = self._project_batch(pooled_data)
+        return self._postprocess_embeddings(embeddings, pooling_param)
+
+    def forward_ragged(
+        self,
+        pooled_data: RaggedTokenBatch,
+        pooling_params: list[PoolingParams],
+    ) -> list[TokenPoolerHeadOutputItem]:
+        if pooled_data.num_items != len(pooling_params):
+            raise ValueError(
+                "pooled_data and pooling_params must have the same length: "
+                f"{pooled_data.num_items} != {len(pooling_params)}."
+            )
+
+        # doing projection for all tokens in the batch
+        embeddings = self._project_batch(pooled_data.values)
+        if self._has_uniform_postprocess(pooling_params):
+            embeddings = self._postprocess_embeddings(embeddings, pooling_params[0])
+            return pooled_data.with_values(embeddings).split()
+
+        # can't apply the same postprocess, doing it separately
+        pooled_outputs = pooled_data.with_values(embeddings).split()
+        return [
+            self._postprocess_embeddings(output, pooling_param)
+            for output, pooling_param in zip(pooled_outputs, pooling_params)
+        ]
+
+    def _project_batch(self, pooled_data: torch.Tensor) -> torch.Tensor:
         if self.head_dtype is not None:
             pooled_data = pooled_data.to(self.head_dtype)
         # pooled_data shape: [n_tokens, hidden_size]
 
         # Apply ST projector
         if self.projector is not None:
-            embeddings = self.projector(pooled_data)
-        else:
-            embeddings = pooled_data
-        # embeddings shape: [n_tokens, embedding_size]
+            return self.projector(pooled_data)
+        return pooled_data
 
+    def _postprocess_embeddings(
+        self,
+        embeddings: torch.Tensor,
+        pooling_param: PoolingParams,
+    ) -> torch.Tensor:
         # for matryoshka representation
         embeddings = embeddings[..., : pooling_param.dimensions]
 
@@ -86,6 +117,20 @@ class TokenEmbeddingPoolerHead(TokenPoolerHead):
 
         # embeddings shape: [n_tokens, embedding_size]
         return embeddings
+
+    def _has_uniform_postprocess(self, pooling_params: list[PoolingParams]) -> bool:
+        # check if we can apply the same postprocess to all tokens in the batch
+        if not pooling_params:
+            return True
+
+        first_param = pooling_params[0]
+        first_dimensions = first_param.dimensions
+        first_use_activation = bool(first_param.use_activation)
+        return all(
+            param.dimensions == first_dimensions
+            and bool(param.use_activation) == first_use_activation
+            for param in pooling_params[1:]
+        )
 
 
 class TokenClassifierPoolerHead(TokenPoolerHead):

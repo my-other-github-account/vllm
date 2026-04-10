@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
 from collections.abc import Set
+from dataclasses import dataclass
 from typing import TypeAlias
 
 import torch
@@ -16,6 +17,59 @@ from vllm.v1.pool.metadata import PoolingMetadata
 TokenPoolingMethodOutputItem: TypeAlias = torch.Tensor | None
 
 
+@dataclass
+class RaggedTokenBatch:
+    values: torch.Tensor
+    cu_lengths_cpu: torch.Tensor
+
+    @classmethod
+    def from_lengths(
+        cls,
+        values: torch.Tensor,
+        lengths_cpu: torch.Tensor,
+    ) -> "RaggedTokenBatch":
+        return cls(
+            values=values,
+            cu_lengths_cpu=_make_cu_lengths_cpu(lengths_cpu),
+        )
+
+    @property
+    def num_items(self) -> int:
+        return self.cu_lengths_cpu.shape[0] - 1
+
+    def with_values(self, values: torch.Tensor) -> "RaggedTokenBatch":
+        return RaggedTokenBatch(
+            values=values,
+            cu_lengths_cpu=self.cu_lengths_cpu,
+        )
+
+    def split(self) -> list[TokenPoolingMethodOutputItem]:
+        outputs = list[TokenPoolingMethodOutputItem]()
+        cu_lengths_cpu = self.cu_lengths_cpu
+
+        for i in range(self.num_items):
+            start = int(cu_lengths_cpu[i])
+            end = int(cu_lengths_cpu[i + 1])
+            outputs.append(self.values[start:end])
+
+        return outputs
+
+
+def _make_cu_lengths_cpu(lengths_cpu: torch.Tensor) -> torch.Tensor:
+    # [1, 2, 3, 4] -> [0, 1, 3, 6, 10]
+    lengths_cpu = lengths_cpu.to(device="cpu", dtype=torch.int64)
+    cu_lengths_cpu = torch.zeros(
+        lengths_cpu.shape[0] + 1, dtype=torch.int64, device="cpu"
+    )
+    torch.cumsum(lengths_cpu, dim=0, out=cu_lengths_cpu[1:])
+    return cu_lengths_cpu
+
+
+TokenPoolingMethodOutput: TypeAlias = (
+    RaggedTokenBatch | list[TokenPoolingMethodOutputItem]
+)
+
+
 class TokenPoolingMethod(nn.Module, ABC):
     def get_supported_tasks(self) -> Set[PoolingTask]:
         return {"token_embed", "token_classify"}
@@ -28,7 +82,7 @@ class TokenPoolingMethod(nn.Module, ABC):
         self,
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
-    ) -> list[TokenPoolingMethodOutputItem]:
+    ) -> TokenPoolingMethodOutput:
         raise NotImplementedError
 
 
@@ -45,8 +99,14 @@ class AllPool(TokenPoolingMethod):
         self,
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
-    ) -> list[TokenPoolingMethodOutputItem]:
+    ) -> TokenPoolingMethodOutput:
         pooling_cursor = pooling_metadata.get_pooling_cursor()
+        if not self.enable_chunked_prefill:
+            return RaggedTokenBatch.from_lengths(
+                values=hidden_states,
+                lengths_cpu=pooling_cursor.num_scheduled_tokens_cpu,
+            )
+
         hidden_states_lst = [
             hidden_states[first : last + 1]
             for first, last in zip(
@@ -54,9 +114,6 @@ class AllPool(TokenPoolingMethod):
                 pooling_cursor.last_token_indices_gpu.tolist(),
             )
         ]
-
-        if not self.enable_chunked_prefill:
-            return hidden_states_lst
 
         pooling_states = pooling_metadata.pooling_states
 
@@ -90,7 +147,12 @@ class StepPool(AllPool):
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
     ) -> list[TokenPoolingMethodOutputItem]:
-        pooled_data_lst = super().forward(hidden_states, pooling_metadata)
+        pooled_data = super().forward(hidden_states, pooling_metadata)
+        pooled_data_lst = (
+            pooled_data.split()
+            if isinstance(pooled_data, RaggedTokenBatch)
+            else pooled_data
+        )
         prompt_token_ids = pooling_metadata.get_prompt_token_ids()
         pooling_params = pooling_metadata.pooling_params
 

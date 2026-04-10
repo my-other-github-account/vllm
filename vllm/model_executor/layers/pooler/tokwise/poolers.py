@@ -28,14 +28,16 @@ from .heads import (
     TokenPoolerHeadOutputItem,
 )
 from .methods import (
+    RaggedTokenBatch,
     TokenPoolingMethod,
+    TokenPoolingMethodOutput,
     TokenPoolingMethodOutputItem,
     get_tok_pooling_method,
 )
 
 TokenPoolingFn: TypeAlias = Callable[
     [torch.Tensor, PoolingMetadata],
-    list[TokenPoolingMethodOutputItem],
+    TokenPoolingMethodOutput,
 ]
 TokenPoolingHeadFn: TypeAlias = Callable[
     [list[TokenPoolingMethodOutputItem], PoolingMetadata],
@@ -89,6 +91,13 @@ class TokenPooler(Pooler):
         pooling_metadata: PoolingMetadata,
     ) -> TokenPoolerOutput:
         pooled_data = self.pooling(hidden_states, pooling_metadata)
+        if isinstance(pooled_data, RaggedTokenBatch):
+            if isinstance(self.head, TokenEmbeddingPoolerHead):
+                return self.head.forward_ragged(
+                    pooled_data, pooling_metadata.pooling_params
+                )
+            else:
+                pooled_data = pooled_data.split()
         pooled_data = self.head(pooled_data, pooling_metadata)
         return pooled_data
 
