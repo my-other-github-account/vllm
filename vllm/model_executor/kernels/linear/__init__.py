@@ -201,6 +201,9 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
         AiterInt8ScaledMMLinearKernel,
         AiterFp8BlockScaledMMKernel,
     },
+    "fbgemm": {
+        FbgemmNvFp4LinearKernel,
+    },
 }
 
 
