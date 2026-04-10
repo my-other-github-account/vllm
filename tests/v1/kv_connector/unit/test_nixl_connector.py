@@ -1352,6 +1352,7 @@ def test_abort_timeout_on_prefiller(monkeypatch, distributed_executor_backend):
 
     timeout = 6
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
     monkeypatch.setenv("VLLM_NIXL_ABORT_REQUEST_TIMEOUT", str(timeout))
 
     def run_test_and_cleanup():

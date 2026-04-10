@@ -25,6 +25,11 @@ from vllm.v1.executor.uniproc_executor import (
 class Mock: ...
 
 
+@pytest.fixture(autouse=True)
+def force_v1_model_runner(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+
+
 def test_supports_async_scheduling_base_executor():
     assert Executor.supports_async_scheduling() is False
 
