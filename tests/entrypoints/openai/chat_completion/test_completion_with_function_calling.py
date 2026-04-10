@@ -10,7 +10,7 @@ import pytest
 import pytest_asyncio
 
 # downloading lora to test lora requests
-from tests.utils import ROCM_ENV_OVERRIDES, ROCM_EXTRA_ARGS, RemoteOpenAIServer
+from tests.utils import ROCM_EXTRA_ARGS, RemoteOpenAIServer
 
 # any model with a chat template should work here
 MODEL_NAME = "Qwen/Qwen3-0.6B"
@@ -144,7 +144,7 @@ def server():
     ] + ROCM_EXTRA_ARGS
 
     with RemoteOpenAIServer(
-        MODEL_NAME, args, env_dict=ROCM_ENV_OVERRIDES
+        MODEL_NAME, args, env_dict={"VLLM_USE_V2_MODEL_RUNNER": "0"}
     ) as remote_server:
         yield remote_server
 
@@ -237,7 +237,7 @@ def k2_server():
     with RemoteOpenAIServer(
         MODEL_NAME,
         args,
-        env_dict=ROCM_ENV_OVERRIDES,
+        env_dict={"VLLM_USE_V2_MODEL_RUNNER": "0"},
         override_hf_configs={"model_type": "kimi_k2"},
     ) as remote_server:
         yield remote_server

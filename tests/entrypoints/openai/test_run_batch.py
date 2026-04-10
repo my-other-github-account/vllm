@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+import os
 import subprocess
 import tempfile
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -544,6 +545,7 @@ def test_reasoning_parser():
                 "--reasoning-parser",
                 "qwen3",
             ],
+            env={**os.environ, "VLLM_USE_V2_MODEL_RUNNER": "0"},
         )
         proc.communicate()
         proc.wait()
@@ -711,6 +713,7 @@ def test_tool_calling():
                 "--tool-call-parser",
                 "hermes",
             ],
+            env={**os.environ, "VLLM_USE_V2_MODEL_RUNNER": "0"},
         )
         proc.communicate()
         proc.wait()

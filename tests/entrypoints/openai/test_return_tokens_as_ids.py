@@ -41,10 +41,14 @@ def server_fixture(request, default_server_args):
     use_server_flag = request.param
     if use_server_flag:
         args_with_flag = default_server_args + ["--return-tokens-as-token-ids"]
-        with RemoteOpenAIServer(MODEL_NAME, args_with_flag) as remote_server:
+        with RemoteOpenAIServer(
+            MODEL_NAME, args_with_flag, env_dict={"VLLM_USE_V2_MODEL_RUNNER": "0"}
+        ) as remote_server:
             yield (remote_server, True)
     else:
-        with RemoteOpenAIServer(MODEL_NAME, default_server_args) as remote_server:
+        with RemoteOpenAIServer(
+            MODEL_NAME, default_server_args, env_dict={"VLLM_USE_V2_MODEL_RUNNER": "0"}
+        ) as remote_server:
             yield (remote_server, False)
 
 
