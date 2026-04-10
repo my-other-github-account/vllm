@@ -117,6 +117,19 @@ MoEBackend = Literal[
     "aiter",
 ]
 
+LinearBackend = Literal[
+    "auto",
+    "cutlass",
+    "flashinfer_cutlass",
+    "flashinfer_trtllm",
+    "flashinfer_cudnn",
+    "marlin",
+    "triton",
+    "deep_gemm",
+    "torch",
+    "aiter",
+]
+
 
 @config
 class KernelConfig:
@@ -144,9 +157,30 @@ class KernelConfig:
     - "marlin": Use Marlin kernels (weight-only quantization)
     - "aiter": Use AMD AITer kernels (ROCm only)"""
 
+    linear_backend: LinearBackend = "auto"
+    """Backend for quantized linear layer GEMM kernels. Available options:
+
+    - "auto": Automatically select the best backend based on model and hardware
+    - "cutlass": Use CUTLASS-based kernels
+    - "flashinfer_cutlass": Use FlashInfer with CUTLASS kernels
+    - "flashinfer_trtllm": Use FlashInfer with TensorRT-LLM kernels
+    - "flashinfer_cudnn": Use FlashInfer with cuDNN kernels
+    - "marlin": Use Marlin kernels
+    - "triton": Use Triton-based kernels
+    - "deep_gemm": Use DeepGEMM kernels
+    - "torch": Use PyTorch native scaled_mm kernels
+    - "aiter": Use AMD AITer kernels (ROCm only)"""
+
     @field_validator("moe_backend", mode="before")
     @classmethod
     def _normalize_moe_backend(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return value.lower().replace("-", "_")
+        return value
+
+    @field_validator("linear_backend", mode="before")
+    @classmethod
+    def _normalize_linear_backend(cls, value: Any) -> Any:
         if isinstance(value, str):
             return value.lower().replace("-", "_")
         return value
