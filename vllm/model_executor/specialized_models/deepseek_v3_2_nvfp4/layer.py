@@ -65,7 +65,7 @@ def dsa(
         output.zero_()
         return output
 
-    num_actual_toks = mla_attn_metadata.num_actual_tokens
+    num_actual_toks = mla_attn_metadata.num_actual_tokens  # noqa
     if num_actual_toks == 0:
         output.zero_()
         return output
@@ -77,7 +77,7 @@ def dsa(
     mla_k_scale = None
     idx_meta = attn_metadata.get(attn.indexer_k_cache.prefix)
     if idx_meta is not None:
-        slot_mapping = idx_meta.slot_mapping
+        slot_mapping = idx_meta.slot_mapping  # noqa
         indexer_k_cache = attn.indexer_k_cache.kv_cache
         mla_kv_cache = attn.mla_attn.kv_cache
         mla_k_scale = attn.mla_attn._k_scale
