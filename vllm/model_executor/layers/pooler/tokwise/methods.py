@@ -38,6 +38,13 @@ class RaggedTokenBatch:
         return self.cu_lengths_cpu.shape[0] - 1
 
     def with_values(self, values: torch.Tensor) -> "RaggedTokenBatch":
+        expected_num_values = int(self.cu_lengths_cpu[-1])
+        if values.ndim == 0 or values.shape[0] != expected_num_values:
+            raise ValueError(
+                "values must preserve the flattened token dimension: "
+                f"{values.shape[0] if values.ndim > 0 else 0} "
+                f"!= {expected_num_values}."
+            )
         return RaggedTokenBatch(
             values=values,
             cu_lengths_cpu=self.cu_lengths_cpu,

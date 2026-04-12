@@ -119,7 +119,7 @@ class TokenEmbeddingPoolerHead(TokenPoolerHead):
         return embeddings
 
     def _has_uniform_postprocess(self, pooling_params: list[PoolingParams]) -> bool:
-        # check if we can apply the same postprocess to all tokens in the batch
+        """Return whether all pooling params share the same postprocess."""
         if not pooling_params:
             return True
 
