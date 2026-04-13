@@ -10,6 +10,10 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import fp8_mqa_logits, fp8_paged_mqa_logits
+from vllm.utils.torch_utils import (
+    LayerNameType,
+    _resolve_layer_name,
+)
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
 )
@@ -22,7 +26,7 @@ RADIX_TOPK_WORKSPACE_SIZE = 1024 * 1024
 
 
 def sparse_attn_indexer(
-    k_cache_prefix: str,
+    k_cache_prefix: LayerNameType,
     kv_cache: torch.Tensor,
     q_fp8: torch.Tensor,
     weights: torch.Tensor,
@@ -35,6 +39,7 @@ def sparse_attn_indexer(
     # careful! this will be None in dummy run
     attn_metadata = get_forward_context().attn_metadata
     fp8_dtype = current_platform.fp8_dtype()
+    k_cache_prefix = _resolve_layer_name(k_cache_prefix)
 
     # assert isinstance(attn_metadata, dict)
     if not isinstance(attn_metadata, dict):
@@ -151,7 +156,7 @@ def sparse_attn_indexer(
         )
         torch.ops._C.persistent_topk(
             logits,
-            decode_metadata.seq_lens,
+            seq_lens,
             topk_indices,
             topk_workspace,
             topk_tokens,
@@ -165,6 +170,6 @@ def sparse_attn_indexer(
                 topk_indices.reshape(batch_size, -1, topk_indices.shape[-1]),
                 decode_lens,
             )
-            topk_indices_buffer[:num_decode_tokens, : topk_indices.shape[-1]] = (
+            topk_indices_buffer[: topk_indices.shape[0], : topk_indices.shape[-1]] = (
                 topk_indices
             )
