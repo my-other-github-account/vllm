@@ -4,9 +4,9 @@
 Regression test for FlashInfer NVFP4 quantization cross-row scale corruption.
 
 FlashInfer's silu_and_mul_scaled_nvfp4_experts_quantize and
-scaled_fp4_grouped_quantize kernels corrupt real token scales when
-padding rows (beyond masked_m) contain NaN or garbage. The scale
-computation leaks across rows via warp-level reduction, corrupting
+scaled_fp4_grouped_quantize kernels corrupt real scales when
+CUDA Graph padding rows contain NaN or garbage. The scale
+computation leaks across rows likely via warp-level reduction, corrupting
 real token output.
 
 Fix: zero-fill padding rows in flashinfer_cutedsl_moe_masked before
@@ -31,7 +31,7 @@ from vllm.platforms import current_platform
         (8, 32, 16),
         (16, 64, 32),
         (32, 128, 64),
-        (8, 64, 8),  # sparse — matches production low-token scenario
+        (8, 64, 8),  # sparse — Can happen due to with DP padding
         (4, 16, 1),  # extreme: 1 real token
     ],
     ids=[
@@ -160,9 +160,8 @@ def test_grouped_quant_cross_row_corruption(num_experts, m, num_real):
     """FlashInfer scaled_fp4_grouped_quantize must not corrupt real token
     output when padding rows contain NaN.
 
-    This is the production kernel for the first quantization step
-    (hidden_states -> NVFP4) in the FlashInferCuteDSLBatchedExperts
-    path when NVFP4 dispatch is NOT used.
+    This is the kernel for the first quantization step (hidden_states -> NVFP4)
+    in the FlashInferCuteDSLBatchedExperts path when NVFP4 dispatch is NOT used.
     """
     from flashinfer import scaled_fp4_grouped_quantize
 
