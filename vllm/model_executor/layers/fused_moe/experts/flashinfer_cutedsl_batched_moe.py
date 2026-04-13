@@ -278,6 +278,14 @@ def flashinfer_cutedsl_moe_masked(
             f"input_global_scale must be (l,), got {input_global_scale.shape}"
         )
 
+        # Zero padding rows before quantization to prevent cross-row
+        # scale corruption in the FlashInfer kernel (NaN/garbage in
+        # padding rows can leak into real token scales via warp-level
+        # reduction).
+        arange = torch.arange(m, device=masked_m.device)
+        pad_mask = arange.unsqueeze(0) >= masked_m.unsqueeze(1)
+        hidden_states[pad_mask] = 0
+
         aq, aq_sf = scaled_fp4_grouped_quantize(
             hidden_states,
             masked_m,
@@ -329,9 +337,17 @@ def flashinfer_cutedsl_moe_masked(
         alpha_dtype=get_cute_dtype(w1_alpha),
     )  # in logical [m, n, l]
 
+    # Zero padding rows before SiLU+quant to prevent cross-row scale
+    # corruption in the FlashInfer kernel (NaN/garbage in padding rows
+    # can leak into real token scales via warp-level reduction).
+    workspace_for_quant = workspace.permute(2, 0, 1)
+    arange = torch.arange(m, device=masked_m.device)
+    pad_mask = arange.unsqueeze(0) >= masked_m.unsqueeze(1)
+    workspace_for_quant[pad_mask] = 0
+
     # SILU and quantization
     diq, diq_sf = silu_and_mul_scaled_nvfp4_experts_quantize(
-        workspace.permute(2, 0, 1),
+        workspace_for_quant,
         masked_m,
         a2_global_scale,
     )

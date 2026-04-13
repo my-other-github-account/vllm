@@ -111,6 +111,7 @@ steps:
   - csrc/attention/mla/
   - csrc/quantization/cutlass_w8a8/moe/
   - vllm/model_executor/layers/fused_moe/cutlass_moe.py
+  - vllm/model_executor/layers/fused_moe/experts/flashinfer_cutedsl_batched_moe.py
   - vllm/model_executor/layers/fused_moe/flashinfer_cutlass_moe.py
   - vllm/model_executor/layers/fused_moe/flashinfer_a2a_prepare_finalize.py
   - vllm/model_executor/layers/quantization/utils/flashinfer_utils.py
@@ -145,6 +146,7 @@ steps:
     - pytest -v -s tests/kernels/moe/test_flashinfer.py
     - pytest -v -s tests/kernels/moe/test_flashinfer_moe.py
     - pytest -v -s tests/kernels/moe/test_cutedsl_moe.py
+    - pytest -v -s tests/kernels/moe/test_flashinfer_nvfp4_quant_padding.py
     # e2e
     - pytest -v -s tests/models/quantization/test_nvfp4.py
 
@@ -194,6 +196,7 @@ steps:
     - pytest -v -s kernels/moe/test_flashinfer_moe.py
     - pytest -v -s kernels/moe/test_nvfp4_moe.py
     - pytest -v -s kernels/moe/test_ocp_mx_moe.py
+    - pytest -v -s kernels/moe/test_flashinfer_nvfp4_quant_padding.py
 
 
 - label: Kernels FusedMoE Layer Test (2 H100s)
