@@ -1170,22 +1170,30 @@ def instanttensor_weights_iterator(
     with instanttensor.safe_open(
         hf_weights_files, framework="pt", device=device, process_group=process_group
     ) as f:
-        for name, tensor in tqdm(
-            f.tensors(),
+        pbar = tqdm(
+            total=f.total_tensor_size,
             desc="Loading safetensors using InstantTensor loader",
             disable=not enable_tqdm(use_tqdm_on_load),
             bar_format=_BAR_FORMAT,
             position=tqdm._get_free_pos(),
-            total=len(f.keys()),
+            unit="B",
+            unit_scale=True,
+            unit_divisor=1024,
             mininterval=1.0,
-        ):
-            # InstantTensor tensors share a buffer owned by the ``safe_open`` context
-            # and are invalidated when the context exits. Some callers such as
-            # ``RobertaEmbeddingModel.load_weights`` fully materialize the iterator
-            # into a list before consuming it, which would leave those tensors
-            # dangling. Clone so each tensor owns its memory.
-            # Reference: https://github.com/scitix/InstantTensor/blob/45763a4a2eb4d1df7f05b988c01c76111c821b59/instanttensor/_impl.py#L535-L540
-            yield name, tensor.clone()
+        )
+        try:
+            for name, tensor in f.tensors():
+                # InstantTensor tensors share a buffer owned by the ``safe_open``
+                # context and are invalidated when the context exits. Some callers
+                # such as ``RobertaEmbeddingModel.load_weights`` fully materialize
+                # the iterator into a list before consuming it, which would leave
+                # those tensors dangling. Clone so each tensor owns its memory.
+                # Reference: https://github.com/scitix/InstantTensor/blob/45763a4a2eb4d1df7f05b988c01c76111c821b59/instanttensor/_impl.py#L535-L540
+                cloned = tensor.clone()
+                pbar.update(cloned.numel() * cloned.element_size())
+                yield name, cloned
+        finally:
+            pbar.close()
 
 
 def pt_weights_iterator(
