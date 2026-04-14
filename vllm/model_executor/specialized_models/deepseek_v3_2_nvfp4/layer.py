@@ -107,10 +107,7 @@ def dsa(
 
     # Step 3. q_c -> index_q, q
     step3_out = torch.mm(q_c, layer._fused_step3_q_w.T)
-    index_q, q = step3_out.split(
-        [layer._step3_index_q_dim, step3_out.shape[-1] - layer._step3_index_q_dim],
-        dim=-1,
-    )
+    index_q, q = step3_out.split(layer._q_split_sizes, dim=-1)
     index_q = index_q.view(-1, attn.index_n_heads, attn.index_head_dim)
     q = q.view(-1, attn.num_local_heads, attn.qk_head_dim)
 
@@ -381,7 +378,7 @@ class DeepseekV32DecoderLayer(nn.Module):
             torch.cat([wq_b, q_b], dim=0),
             requires_grad=False,
         )
-        self._step3_index_q_dim = wq_b.shape[0]
+        self._q_split_sizes = [wq_b.shape[0], q_b.shape[0]]
 
 
 class DeepseekV32MLAAttention(nn.Module):
