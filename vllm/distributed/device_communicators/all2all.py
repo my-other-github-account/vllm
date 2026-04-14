@@ -103,11 +103,13 @@ def moe_dispatch(
                 total_bytes = (total_bytes + 15) & ~15
                 total_bytes += nbytes
 
-            max_bytes = min(1 * 1024 * 1024, moe_ag.max_size)
+            max_bytes = moe_ag.max_per_rank
             if ok and total_bytes <= max_bytes:
                 outputs = [
                     torch.empty(
-                        (t.shape[0] * ws, *t.shape[1:]), dtype=t.dtype, device=t.device
+                        (t.shape[0] * ws, *t.shape[1:]),
+                        dtype=t.dtype,
+                        device=t.device,
                     )
                     for t in tensors
                 ]
@@ -118,11 +120,12 @@ def moe_dispatch(
 
                 lib = _load_lib()
                 lib.moe_all_gather(
-                    moe_ag._rank_data_ptr,
-                    moe_ag._rank_signals_ptr,
-                    moe_ag._self_signal_ptr,
+                    moe_ag._buf_ptrs_ptr,
+                    moe_ag._counters_ptr,
                     moe_ag.rank,
                     ws,
+                    moe_ag.seg_capacity,
+                    moe_ag.rank_stride,
                     tensors,
                     outputs,
                 )
@@ -385,10 +388,10 @@ class AgRsAll2AllManager(All2AllManagerBase):
             total_bytes = (total_bytes + 15) & ~15
             total_bytes += nbytes
 
-        if total_bytes > moe_ag.max_size:
+        if total_bytes > moe_ag.max_per_rank:
             if _dbg < 10:
                 _log.warning(
-                    f"MoE AG: too large {total_bytes} > {moe_ag.max_size} "
+                    f"MoE AG: too large {total_bytes} > {moe_ag.max_per_rank} "
                     f"n={n} shapes={[t.shape for t in tensors]}"
                 )
                 self._ag_dbg_count = _dbg + 1
@@ -406,11 +409,12 @@ class AgRsAll2AllManager(All2AllManagerBase):
 
         lib = _load_lib()
         lib.moe_all_gather(
-            moe_ag._rank_data_ptr,
-            moe_ag._rank_signals_ptr,
-            moe_ag._self_signal_ptr,
+            moe_ag._buf_ptrs_ptr,
+            moe_ag._counters_ptr,
             moe_ag.rank,
             ws,
+            moe_ag.seg_capacity,
+            moe_ag.rank_stride,
             tensors,
             outputs,
         )

@@ -1,25 +1,27 @@
-// Standalone fused MoE all-gather kernel for EP dispatch.
+// Lamport-based MoE all-gather kernel for EP dispatch.
 //
-// JIT-compilable via torch.utils.cpp_extension — no vLLM build required.
+// Replaces the flag-barrier approach with a Lamport sentinel protocol
+// (inspired by FlashInfer's trtllm_allreduce_fusion).
 //
-// Gathers the MoE dispatch tensors from all EP ranks in a single kernel:
-//   - topk_ids      [N, topk]         int32
-//   - topk_weights  [N, topk]         float32 / bfloat16
-//   - hidden_states [N, D_h]          uint8 (NVFP4) / bfloat16
-//   - quant_scales  [N, D_s]          (optional) any dtype
+// Key advantages over the flag-barrier approach:
+//   - No explicit barriers (sentinels provide per-element synchronization).
+//   - Push model: NVLink writes (fire-and-forget) instead of NVLink reads.
+//   - Triple buffering: no end barrier needed.
 //
-// Each tensor is packed into a pre-registered IPC buffer at 16-byte-aligned
-// offsets.  The kernel:
-//   1. Copies inputs into the IPC buffer (local SM write).
-//   2. Barrier — all ranks' writes become visible via NVLink.
-//   3. Gathers from all peers' buffers into separate output tensors.
-//   4. Barrier — done.
+// Gathers the MoE dispatch tensors from all EP ranks:
+//   - topk_ids      [N, topk]     int32
+//   - topk_weights  [N, topk]     float32 / bfloat16
+//   - hidden_states [N, D_h]      uint8 (NVFP4) / bfloat16
+//   - quant_scales  [N, D_s]      (optional)
 //
-// Under CUDA graphs, the input tensor addresses are fixed and the buffer
-// copies are captured.  The total overhead is dominated by the two barrier
-// round-trips (~5µs each on NVLink).
+// Double-buffer layout in each rank's IPC buffer:
+//   [Segment 0][Segment 1]
+//   Each segment: [Rank 0 slot][Rank 1 slot]...[Rank N-1 slot]
+//   Each rank slot: packed tensors at 16-byte aligned offsets.
 //
-// All data movement uses 128-bit (int4) loads/stores.
+// Sentinel: 0x80000000 (negative-zero in float32).  The writer replaces
+// any data word matching the sentinel with 0 before pushing.  The reader
+// spin-loads (volatile) until no sentinel words remain in the vector.
 
 #include <cuda.h>
 #include <cuda_runtime.h>
@@ -28,193 +30,166 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAStream.h>
 
-// ---------------------------------------------------------------------------
-// Flag-based barrier (from custom_all_reduce.cuh, standalone)
-// ---------------------------------------------------------------------------
-
-constexpr int kMaxBlocks = 36;
-
-using FlagType = uint32_t;
-
-struct Signal {
-  alignas(128) FlagType start[kMaxBlocks][8];
-  alignas(128) FlagType end[kMaxBlocks][8];
-  alignas(128) FlagType _flag[kMaxBlocks];
-};
-
-struct __align__(16) RankData {
-  const void* ptrs[8];
-};
-
-struct __align__(16) RankSignals {
-  Signal* signals[8];
-};
-
 #define DINLINE __device__ __forceinline__
 
-static DINLINE void st_flag_volatile(FlagType* addr, FlagType val) {
-  asm volatile("st.volatile.global.u32 [%1], %0;" ::"r"(val), "l"(addr));
-}
+constexpr uint32_t SENTINEL = 0x80000000u;
+constexpr int kMaxBlocks = 36;
 
-static DINLINE FlagType ld_flag_volatile(FlagType* addr) {
-  FlagType v;
-  asm volatile("ld.volatile.global.u32 %0, [%1];" : "=r"(v) : "l"(addr));
+// ---------------------------------------------------------------------------
+// Volatile 128-bit load/store and sentinel helpers
+// ---------------------------------------------------------------------------
+
+static DINLINE int4 ld128v(const void* addr) {
+  int4 v;
+  asm volatile("ld.volatile.global.v4.b32 {%0,%1,%2,%3}, [%4];"
+               : "=r"(v.x), "=r"(v.y), "=r"(v.z), "=r"(v.w)
+               : "l"(addr));
   return v;
 }
 
-template <int ngpus>
-DINLINE void barrier_at_start(const RankSignals& sg, Signal* self_sg,
-                              int rank) {
-  FlagType flag = self_sg->_flag[blockIdx.x] + 1;
-  if (threadIdx.x < ngpus) {
-    st_flag_volatile(&sg.signals[threadIdx.x]->start[blockIdx.x][rank], flag);
-    while (ld_flag_volatile(&self_sg->start[blockIdx.x][threadIdx.x]) != flag);
-  }
-  __syncthreads();
-  if (threadIdx.x == 0) self_sg->_flag[blockIdx.x] = flag;
+static DINLINE bool has_sentinel(int4 v) {
+  return reinterpret_cast<uint32_t&>(v.x) == SENTINEL |
+         reinterpret_cast<uint32_t&>(v.y) == SENTINEL |
+         reinterpret_cast<uint32_t&>(v.z) == SENTINEL |
+         reinterpret_cast<uint32_t&>(v.w) == SENTINEL;
 }
 
-template <int ngpus>
-DINLINE void barrier_at_end(const RankSignals& sg, Signal* self_sg, int rank) {
-  __syncthreads();
-  FlagType flag = self_sg->_flag[blockIdx.x] + 1;
-  if (threadIdx.x < ngpus) {
-    st_flag_volatile(&sg.signals[threadIdx.x]->end[blockIdx.x][rank], flag);
-    while (ld_flag_volatile(&self_sg->end[blockIdx.x][threadIdx.x]) != flag);
-  }
-  if (threadIdx.x == 0) self_sg->_flag[blockIdx.x] = flag;
+static DINLINE int4 remove_sentinel(int4 v) {
+  if (reinterpret_cast<uint32_t&>(v.x) == SENTINEL) v.x = 0;
+  if (reinterpret_cast<uint32_t&>(v.y) == SENTINEL) v.y = 0;
+  if (reinterpret_cast<uint32_t&>(v.z) == SENTINEL) v.z = 0;
+  if (reinterpret_cast<uint32_t&>(v.w) == SENTINEL) v.w = 0;
+  return v;
 }
 
 // ---------------------------------------------------------------------------
-// Fused MoE dispatch all-gather kernel
+// Lamport all-gather kernel
 // ---------------------------------------------------------------------------
-
-// The kernel has 4 phases:
-//   1. Pack local inputs into IPC buffer.
-//   2. Barrier (all ranks' data visible).
-//   3. Gather: one tight contiguous read from each peer → flat staging buffer.
-//   4. Barrier (gather done, safe to overwrite IPC buffer next iteration).
-//   5. Scatter: redistribute the flat staging into per-tensor outputs (local
-//   L2).
 //
-// Phase 3 is NVLink-critical: one loop, no conditionals, all peers pipelined.
-// Phase 5 is local-memory only (L2 speed), runs AFTER the end barrier.
-
-// has_scales: compile-time flag for the optional 4th tensor (quant_scales).
-//
-// Future optimization (TODO): register hidden_states via IPC (like custom
-// allreduce does in graph mode) to skip its Phase 1 copy.  This would save
-// ~3µs by eliminating the hidden_states copy + reducing the scatter.
-// Requires CUDA graph integration to register the hidden_states tensor
-// address during capture.
+// Phase 1 — PUSH: each rank writes its packed data to ALL peers' current
+//           segment via regular stores (NVLink push, fire-and-forget).
+// Phase 2 — CLEAR: each rank writes sentinels to the OLDEST segment of
+//           its own buffer, preparing it for reuse.
+// Phase 3 — POLL + SCATTER: each rank volatile-loads from its own current
+//           segment, spinning until sentinels disappear, then scatters
+//           directly to per-tensor output arrays.
+// Phase 4 — ADVANCE: one thread advances the triple-buffer ring counter.
 
 template <int ngpus, int nbufs>
-__global__ void __launch_bounds__(512, 1)
-    moe_allgather_kernel(RankData* _dp, RankSignals sg, Signal* self_sg,
-                         int rank,
-                         // up to 4 inputs
-                         const void* inp0, const void* inp1, const void* inp2,
-                         const void* inp3, int off0, int sz0, int off1, int sz1,
-                         int off2, int sz2, int off3, int sz3, void* out0,
-                         void* out1, void* out2, void* out3, void* staging,
-                         int total_sz) {
+__global__ void __launch_bounds__(512, 1) moe_allgather_lamport_kernel(
+    int64_t* buf_ptrs,  // [ngpus] IPC buffer base addresses (device)
+    int* counters,      // [0] = unused, [1] = ring (0/1/2), [2] = prev total_sz
+    int rank,
+    int seg_capacity,  // bytes per segment
+    int rank_stride,   // bytes per rank-slot within a segment
+    int total_sz,      // int4 units of actual packed data per rank
+    // inputs (up to 4)
+    const void* inp0, const void* inp1, const void* inp2, const void* inp3,
+    int off0, int sz0, int off1, int sz1, int off2, int sz2, int off3, int sz3,
+    // outputs (up to 4)
+    void* out0, void* out1, void* out2, void* out3) {
   using V = int4;
+  const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  const int stride = gridDim.x * blockDim.x;
+
+  // Read segment index and previous clear size.
+  const int seg = counters[1];            // 0 or 1
+  const int prev_total_sz = counters[2];  // set by previous invocation
+  const int cur_seg = seg;
+  const int old_seg = 1 - seg;
+
+  char* bufs[ngpus];
+#pragma unroll
+  for (int r = 0; r < ngpus; r++)
+    bufs[r] = reinterpret_cast<char*>(buf_ptrs[r]) + cur_seg * seg_capacity;
+
+  // Sentinel vector for clearing.
+  V sent;
+  sent.x = sent.y = sent.z = sent.w = static_cast<int>(SENTINEL);
+
+  // ---- Phase 1: PUSH local data to ALL peers ----
+  // Write to peer_r's buffer at [rank * rank_stride + off_i].
+
+#define PUSH(idx, inp_ptr, off_val, sz_val)                                 \
+  if constexpr (nbufs > (idx)) {                                            \
+    const V* src = reinterpret_cast<const V*>(inp_ptr);                     \
+    for (int i = tid; i < (sz_val); i += stride) {                          \
+      V val = remove_sentinel(src[i]);                                      \
+      _Pragma("unroll") for (int r = 0; r < ngpus; r++) {                   \
+        reinterpret_cast<V*>(bufs[r] + rank * rank_stride + (off_val))[i] = \
+            val;                                                            \
+      }                                                                     \
+    }                                                                       \
+  }
+
+  PUSH(0, inp0, off0, sz0)
+  PUSH(1, inp1, off1, sz1)
+  PUSH(2, inp2, off2, sz2)
+  PUSH(3, inp3, off3, sz3)
+#undef PUSH
+
+  // ---- Phase 2: CLEAR only the previously-written data in oldest segment ----
+  // Only clear what the previous invocation actually wrote (per rank-slot).
+  if (prev_total_sz > 0) {
+    char* clr_base =
+        reinterpret_cast<char*>(buf_ptrs[rank]) + old_seg * seg_capacity;
+#pragma unroll
+    for (int r = 0; r < ngpus; r++) {
+      V* clr = reinterpret_cast<V*>(clr_base + r * rank_stride);
+      for (int i = tid; i < prev_total_sz; i += stride) clr[i] = sent;
+    }
+  }
+
+  // ---- Phase 3: POLL + SCATTER ----
+  // Volatile-load from own buffer; spin until sentinel gone; scatter to output.
+  char* my = bufs[rank];
+
+#define POLL(idx, out_ptr, off_val, sz_val)                                \
+  if constexpr (nbufs > (idx)) {                                           \
+    for (int i = tid; i < (sz_val); i += stride) {                         \
+      _Pragma("unroll") for (int s = 0; s < ngpus; s++) {                  \
+        V val;                                                             \
+        do {                                                               \
+          val = ld128v(                                                    \
+              reinterpret_cast<V*>(my + s * rank_stride + (off_val)) + i); \
+        } while (has_sentinel(val));                                       \
+        reinterpret_cast<V*>(out_ptr)[s * (sz_val) + i] = val;             \
+      }                                                                    \
+    }                                                                      \
+  }
+
+  POLL(0, out0, off0, sz0)
+  POLL(1, out1, off1, sz1)
+  POLL(2, out2, off2, sz2)
+  POLL(3, out3, off3, sz3)
+#undef POLL
+
+  // ---- Phase 4: ADVANCE ring counter + store clear size for next call ----
+  // Stream serialization ensures the next kernel sees these updates.
+  if (blockIdx.x == 0 && threadIdx.x == 0) {
+    counters[1] = 1 - seg;
+    counters[2] = total_sz;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Sentinel initialization kernel
+// ---------------------------------------------------------------------------
+
+__global__ void lamport_init_kernel(uint32_t* buf, int n) {
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
   int stride = gridDim.x * blockDim.x;
-  auto dp = *_dp;
-  char* my_buf = (char*)dp.ptrs[rank];
-
-  // Phase 1: pack local inputs into IPC buffer.
-  if constexpr (nbufs > 0) {
-    const V* s = (const V*)inp0;
-    V* d = (V*)(my_buf + off0);
-    for (int i = tid; i < sz0; i += stride) d[i] = s[i];
-  }
-  if constexpr (nbufs > 1) {
-    const V* s = (const V*)inp1;
-    V* d = (V*)(my_buf + off1);
-    for (int i = tid; i < sz1; i += stride) d[i] = s[i];
-  }
-  if constexpr (nbufs > 2) {
-    const V* s = (const V*)inp2;
-    V* d = (V*)(my_buf + off2);
-    for (int i = tid; i < sz2; i += stride) d[i] = s[i];
-  }
-  if constexpr (nbufs > 3) {
-    const V* s = (const V*)inp3;
-    V* d = (V*)(my_buf + off3);
-    for (int i = tid; i < sz3; i += stride) d[i] = s[i];
-  }
-
-  __threadfence_system();
-
-  // Phase 2: barrier.
-  barrier_at_start<ngpus>(sg, self_sg, rank);
-
-  // Phase 3: single contiguous gather into staging buffer.
-  {
-    const V* peers[ngpus];
-#pragma unroll
-    for (int s = 0; s < ngpus; s++) peers[s] = (const V*)dp.ptrs[s];
-
-    for (int i = tid; i < total_sz; i += stride) {
-#pragma unroll
-      for (int s = 0; s < ngpus; s++)
-        ((V*)staging)[s * total_sz + i] = peers[s][i];
-    }
-  }
-
-  // Phase 4: end barrier.
-  barrier_at_end<ngpus>(sg, self_sg, rank);
-
-  // Phase 5: scatter from staging to per-tensor outputs (local L2).
-  {
-    const V* stg = (const V*)staging;
-
-    if constexpr (nbufs > 0) {
-      const int b0 = off0 / (int)sizeof(V);
-      for (int i = tid; i < sz0; i += stride) {
-#pragma unroll
-        for (int s = 0; s < ngpus; s++)
-          ((V*)out0)[s * sz0 + i] = stg[s * total_sz + b0 + i];
-      }
-    }
-    if constexpr (nbufs > 1) {
-      const int b1 = off1 / (int)sizeof(V);
-      for (int i = tid; i < sz1; i += stride) {
-#pragma unroll
-        for (int s = 0; s < ngpus; s++)
-          ((V*)out1)[s * sz1 + i] = stg[s * total_sz + b1 + i];
-      }
-    }
-    if constexpr (nbufs > 2) {
-      const int b2 = off2 / (int)sizeof(V);
-      for (int i = tid; i < sz2; i += stride) {
-#pragma unroll
-        for (int s = 0; s < ngpus; s++)
-          ((V*)out2)[s * sz2 + i] = stg[s * total_sz + b2 + i];
-      }
-    }
-    if constexpr (nbufs > 3) {
-      const int b3 = off3 / (int)sizeof(V);
-      for (int i = tid; i < sz3; i += stride) {
-#pragma unroll
-        for (int s = 0; s < ngpus; s++)
-          ((V*)out3)[s * sz3 + i] = stg[s * total_sz + b3 + i];
-      }
-    }
-  }
+  for (int i = tid; i < n; i += stride) buf[i] = SENTINEL;
 }
 
 // ---------------------------------------------------------------------------
 // Host launcher
 // ---------------------------------------------------------------------------
 
-// Compute 16-byte-aligned offset and int4-unit size for one tensor.
 struct TensorDesc {
   void* inp;
-  int off;  // byte offset in IPC buffer
-  int sz;   // size in int4 (16-byte) units
+  int off;
+  int sz;
   int64_t nbytes;
 };
 
@@ -233,9 +208,16 @@ static TensorDesc make_desc(torch::Tensor& inp, int64_t& cursor) {
   return d;
 }
 
-void moe_all_gather(int64_t rank_data_ptr, int64_t signals_ptr,
-                    int64_t self_signal_ptr, int64_t rank, int64_t world_size,
-                    std::vector<torch::Tensor>& inputs,
+void lamport_init(int64_t buf_ptr, int64_t nbytes) {
+  auto stream = c10::cuda::getCurrentCUDAStream().stream();
+  int n = static_cast<int>(nbytes / 4);
+  lamport_init_kernel<<<256, 256, 0, stream>>>(
+      reinterpret_cast<uint32_t*>(buf_ptr), n);
+}
+
+void moe_all_gather(int64_t buf_ptrs_ptr, int64_t counters_ptr, int64_t rank,
+                    int64_t world_size, int64_t seg_capacity,
+                    int64_t rank_stride, std::vector<torch::Tensor>& inputs,
                     std::vector<torch::Tensor>& outputs) {
   auto stream = c10::cuda::getCurrentCUDAStream().stream();
   int n = static_cast<int>(inputs.size());
@@ -247,17 +229,16 @@ void moe_all_gather(int64_t rank_data_ptr, int64_t signals_ptr,
   for (int i = 0; i < n; i++) descs[i] = make_desc(inputs[i], cursor);
   TORCH_CHECK(cursor % 16 == 0);
   int total_sz = static_cast<int>(cursor / 16);
+  TORCH_CHECK(cursor <= rank_stride, "packed data (", cursor,
+              " bytes) exceeds rank_stride (", rank_stride, " bytes)");
 
+  int ws = static_cast<int>(world_size);
   for (int i = 0; i < n; i++) {
     TORCH_CHECK(outputs[i].is_contiguous());
-    TORCH_CHECK(outputs[i].numel() == inputs[i].numel() * world_size);
+    TORCH_CHECK(outputs[i].numel() == inputs[i].numel() * ws);
   }
 
-  auto* ptrs = reinterpret_cast<RankData*>(rank_data_ptr);
-  RankSignals sg = *reinterpret_cast<RankSignals*>(signals_ptr);
-  auto* self_sg = reinterpret_cast<Signal*>(self_signal_ptr);
   int r = static_cast<int>(rank);
-
   int threads = 512;
   int blocks =
       std::max(1, std::min(kMaxBlocks, (total_sz + threads - 1) / threads));
@@ -271,32 +252,33 @@ void moe_all_gather(int64_t rank_data_ptr, int64_t signals_ptr,
     outs[i] = outputs[i].data_ptr();
   }
 
-  auto staging = torch::empty(
-      {(int64_t)world_size * total_sz * (int64_t)sizeof(int4)},
-      torch::TensorOptions().dtype(torch::kUInt8).device(inputs[0].device()));
+  auto* bp = reinterpret_cast<int64_t*>(buf_ptrs_ptr);
+  auto* ct = reinterpret_cast<int*>(counters_ptr);
+  int sc = static_cast<int>(seg_capacity);
+  int rs = static_cast<int>(rank_stride);
 
-#define KL(ngpus, nb)                                                     \
-  moe_allgather_kernel<ngpus, nb><<<blocks, threads, 0, stream>>>(        \
-      ptrs, sg, self_sg, r, inps[0], inps[1], inps[2], inps[3], offs[0],  \
-      szs[0], offs[1], szs[1], offs[2], szs[2], offs[3], szs[3], outs[0], \
-      outs[1], outs[2], outs[3], staging.data_ptr(), total_sz);
+#define KL(ng, nb)                                                        \
+  moe_allgather_lamport_kernel<ng, nb><<<blocks, threads, 0, stream>>>(   \
+      bp, ct, r, sc, rs, total_sz, inps[0], inps[1], inps[2], inps[3],    \
+      offs[0], szs[0], offs[1], szs[1], offs[2], szs[2], offs[3], szs[3], \
+      outs[0], outs[1], outs[2], outs[3]);
 
-#define GPU_CASE(ngpus) \
-  case ngpus:           \
-    switch (n) {        \
-      case 2:           \
-        KL(ngpus, 2);   \
-        break;          \
-      case 3:           \
-        KL(ngpus, 3);   \
-        break;          \
-      case 4:           \
-        KL(ngpus, 4);   \
-        break;          \
-    }                   \
+#define GPU_CASE(ng) \
+  case ng:           \
+    switch (n) {     \
+      case 2:        \
+        KL(ng, 2);   \
+        break;       \
+      case 3:        \
+        KL(ng, 3);   \
+        break;       \
+      case 4:        \
+        KL(ng, 4);   \
+        break;       \
+    }                \
     break;
 
-  switch (world_size) {
+  switch (ws) {
     GPU_CASE(2)
     GPU_CASE(4)
     GPU_CASE(6)
@@ -313,6 +295,7 @@ void moe_all_gather(int64_t rank_data_ptr, int64_t signals_ptr,
 // ---------------------------------------------------------------------------
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("moe_all_gather", &moe_all_gather,
-        "Fused MoE dispatch all-gather with in-kernel scatter");
+  m.def("moe_all_gather", &moe_all_gather, "Lamport MoE all-gather");
+  m.def("lamport_init", &lamport_init,
+        "Initialize Lamport buffer with sentinels");
 }

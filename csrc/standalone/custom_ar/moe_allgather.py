@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-Standalone fused MoE all-gather for EP dispatch.
+Lamport-based fused MoE all-gather for EP dispatch.
 
 JIT-compiles the CUDA kernel on first use (cached afterwards).
-The kernel gathers contiguously from all peers (NVLink-optimal),
-then scatters to per-tensor outputs inside the kernel (local L2).
-Zero Python-side post-processing.
+Uses a Lamport sentinel protocol (push writes + per-element sync)
+with triple-buffered IPC regions — no explicit barriers.
 
 Usage:
     ag = MoeAllGather(custom_allreduce)
@@ -41,28 +40,43 @@ def _load_lib():
 
 
 class MoeAllGather:
-    """Fused MoE dispatch all-gather backed by a one-shot flag-barrier kernel."""
+    """Lamport-based MoE dispatch all-gather with triple buffering."""
 
     def __init__(self, ca_comm):
         self.rank = ca_comm.rank
         self.world_size = ca_comm.world_size
         self.device = ca_comm.device
-        self.meta_ptrs = ca_comm.meta_ptrs
         self.buffer_ptrs = ca_comm.buffer_ptrs
         self.max_size = ca_comm.max_size
 
-        self._rank_signals = torch.zeros(8, dtype=torch.int64)
-        for i in range(self.world_size):
-            self._rank_signals[i] = self.meta_ptrs[i]
-        self._rank_signals_ptr = self._rank_signals.data_ptr()
-        self._self_signal_ptr = self.meta_ptrs[self.rank]
+        ws = self.world_size
+        # Double-buffer layout: 2 segments, each with ws rank-slots.
+        # Safe because kernels in the same stream are serialized, and the
+        # Lamport poll ensures all cross-GPU pushes complete before the
+        # kernel returns.
+        # seg_capacity and rank_stride are 16-byte aligned.
+        self.seg_capacity = (self.max_size // 2) & ~15
+        self.rank_stride = (self.seg_capacity // ws) & ~15
+        self.max_per_rank = self.rank_stride  # max packed bytes per rank
 
-        self._rank_data = torch.zeros(
+        # Buffer pointer array on device.
+        self._buf_ptrs = torch.zeros(
             8, dtype=torch.int64, device=f"cuda:{self.device.index}"
         )
-        for i in range(self.world_size):
-            self._rank_data[i] = self.buffer_ptrs[i]
-        self._rank_data_ptr = self._rank_data.data_ptr()
+        for i in range(ws):
+            self._buf_ptrs[i] = self.buffer_ptrs[i]
+        self._buf_ptrs_ptr = self._buf_ptrs.data_ptr()
+
+        # Counters on device: [0]=unused, [1]=ring index (0/1/2), [2]=prev_total_sz.
+        self._counters = torch.zeros(
+            3, dtype=torch.int32, device=f"cuda:{self.device.index}"
+        )
+        self._counters_ptr = self._counters.data_ptr()
+
+        # Initialize ALL segments with sentinel values.
+        lib = _load_lib()
+        lib.lamport_init(self.buffer_ptrs[self.rank], self.max_size)
+        torch.accelerator.synchronize(self.device)
 
     def gather(
         self,
@@ -84,11 +98,12 @@ class MoeAllGather:
         ]
 
         lib.moe_all_gather(
-            self._rank_data_ptr,
-            self._rank_signals_ptr,
-            self._self_signal_ptr,
+            self._buf_ptrs_ptr,
+            self._counters_ptr,
             self.rank,
             self.world_size,
+            self.seg_capacity,
+            self.rank_stride,
             inputs,
             outputs,
         )
