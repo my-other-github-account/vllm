@@ -280,8 +280,6 @@ fptr_t init_custom_ar(const std::vector<int64_t>& fake_ipc_ptrs,
                       bool fully_connected);
 void all_reduce(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out,
                 fptr_t reg_buffer, int64_t reg_buffer_sz_bytes);
-void reduce_scatter(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out,
-                    fptr_t reg_buffer, int64_t reg_buffer_sz_bytes);
 void dispose(fptr_t _fa);
 int64_t meta_size();
 void register_buffer(fptr_t _fa, const std::vector<int64_t>& fake_ipc_ptrs);

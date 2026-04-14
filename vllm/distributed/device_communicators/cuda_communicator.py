@@ -250,10 +250,6 @@ class CudaCommunicator(DeviceCommunicatorBase):
         input_tensor = input_.movedim(0, dim).contiguous()
 
         assert input_tensor.shape[0] % world_size == 0
-
-        # TODO: custom reduce_scatter disabled for now — needs testing
-        # with torch.compile + CUDA graph pipeline before enabling.
-
         chunk_size = input_tensor.shape[0] // world_size
         output_shape = (chunk_size,) + input_tensor.shape[1:]
 
