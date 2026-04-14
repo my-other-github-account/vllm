@@ -27,15 +27,13 @@ logger = init_logger(__name__)
 # opaque.  The real implementation decides custom kernel vs NCCL at runtime
 # based on tensor sizes.
 
-# Global reference to the MoeAllGather instance per group, set lazily.
+# Global reference to the MoeAllGather/MoeReduceScatter per group, set lazily.
 _moe_ag_instances: dict[str, Any] = {}
+_moe_rs_instances: dict[str, Any] = {}
 
 
-def _get_or_create_moe_ag(group_name: str):
-    """Get or lazily create the MoeAllGather for this group."""
-    if group_name in _moe_ag_instances:
-        return _moe_ag_instances[group_name]
-
+def _get_ca_comm(group_name: str):
+    """Get the CustomAllreduce communicator for a group, or None."""
     from vllm.distributed.parallel_state import _groups
 
     group_ref = _groups.get(group_name)
@@ -44,12 +42,22 @@ def _get_or_create_moe_ag(group_name: str):
     group = group_ref()
     if group is None:
         return None
-
     dc = getattr(group, "device_communicator", None)
     if dc is None:
         return None
     ca = getattr(dc, "ca_comm", None)
     if ca is None or ca.disabled or not getattr(ca, "fully_connected", False):
+        return None
+    return ca
+
+
+def _get_or_create_moe_ag(group_name: str):
+    """Get or lazily create the MoeAllGather for this group."""
+    if group_name in _moe_ag_instances:
+        return _moe_ag_instances[group_name]
+
+    ca = _get_ca_comm(group_name)
+    if ca is None:
         _moe_ag_instances[group_name] = None
         return None
 
@@ -64,6 +72,30 @@ def _get_or_create_moe_ag(group_name: str):
         return ag
     except ImportError:
         _moe_ag_instances[group_name] = None
+        return None
+
+
+def _get_or_create_moe_rs(group_name: str):
+    """Get or lazily create the MoeReduceScatter for this group."""
+    if group_name in _moe_rs_instances:
+        return _moe_rs_instances[group_name]
+
+    ca = _get_ca_comm(group_name)
+    if ca is None:
+        _moe_rs_instances[group_name] = None
+        return None
+
+    try:
+        from vllm.jit_kernels.moe_reduce_scatter.moe_reduce_scatter import (
+            MoeReduceScatter,
+        )
+
+        rs = MoeReduceScatter(ca)
+        _moe_rs_instances[group_name] = rs
+        logger.info("MoE custom reduce-scatter initialized for group %s", group_name)
+        return rs
+    except ImportError:
+        _moe_rs_instances[group_name] = None
         return None
 
 
@@ -157,6 +189,88 @@ direct_register_custom_op(
     op_name="moe_dispatch",
     op_func=moe_dispatch,
     fake_impl=moe_dispatch_fake,
+    mutates_args=[],
+)
+
+
+def moe_combine(
+    hidden_states: torch.Tensor,
+    group_name: str,
+) -> torch.Tensor:
+    """Reduce-scatter hidden_states across the EP/DP group.
+
+    Tries the custom Lamport kernel first; falls back to NCCL.
+    """
+    from vllm.distributed.parallel_state import _groups
+
+    group_ref = _groups.get(group_name)
+    assert group_ref is not None
+    group = group_ref()
+    assert group is not None
+
+    ws = group.world_size
+    n_total = hidden_states.shape[0]
+
+    # Try custom kernel for small, uniform, bf16 inputs.
+    if (
+        n_total % ws == 0
+        and hidden_states.is_contiguous()
+        and hidden_states.dtype == torch.bfloat16
+    ):
+        moe_rs = _get_or_create_moe_rs(group_name)
+        if moe_rs is not None:
+            input_bytes = hidden_states.numel() * hidden_states.element_size()
+            if input_bytes % 16 == 0 and input_bytes <= moe_rs.max_per_rank:
+                from vllm.jit_kernels.moe_reduce_scatter.moe_reduce_scatter import (  # noqa: E501
+                    _load_lib,
+                )
+
+                lib = _load_lib()
+                n_per_rank = n_total // ws
+                output = torch.empty(
+                    (n_per_rank, *hidden_states.shape[1:]),
+                    dtype=hidden_states.dtype,
+                    device=hidden_states.device,
+                )
+                lib.moe_reduce_scatter(
+                    moe_rs._buf_ptrs_ptr,
+                    moe_rs._counters_ptr,
+                    moe_rs.rank,
+                    ws,
+                    moe_rs.seg_capacity,
+                    moe_rs.rank_stride,
+                    hidden_states,
+                    output,
+                )
+                return output
+
+    # Fallback: NCCL reduce_scatter.
+    return group.device_communicator.reduce_scatter(hidden_states, dim=0)
+
+
+def moe_combine_fake(
+    hidden_states: torch.Tensor,
+    group_name: str,
+) -> torch.Tensor:
+    """Fake impl for torch.compile tracing."""
+    from vllm.distributed.parallel_state import _groups
+
+    group_ref = _groups.get(group_name)
+    assert group_ref is not None
+    group = group_ref()
+    ws = group.world_size if group is not None else 1
+    n_per_rank = hidden_states.shape[0] // ws
+    return torch.empty(
+        (n_per_rank, *hidden_states.shape[1:]),
+        dtype=hidden_states.dtype,
+        device=hidden_states.device,
+    )
+
+
+direct_register_custom_op(
+    op_name="moe_combine",
+    op_func=moe_combine,
+    fake_impl=moe_combine_fake,
     mutates_args=[],
 )
 
@@ -512,7 +626,16 @@ class AgRsAll2AllManager(All2AllManagerBase):
         assert sizes is not None
 
         dist_group = get_ep_group() if is_sequence_parallel else get_dp_group()
-        hidden_states = dist_group.reduce_scatterv(hidden_states, dim=0, sizes=sizes)
+
+        # Use custom op so torch.compile treats this as opaque.
+        if all(s == sizes[0] for s in sizes):
+            hidden_states = torch.ops.vllm.moe_combine(
+                hidden_states, group_name=dist_group.unique_name
+            )
+        else:
+            hidden_states = dist_group.reduce_scatterv(
+                hidden_states, dim=0, sizes=sizes
+            )
         return hidden_states
 
     def destroy(self):
