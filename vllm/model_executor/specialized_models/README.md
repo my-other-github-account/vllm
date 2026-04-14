@@ -1,4 +1,4 @@
-# Specialized Models
+# [Experimental] Specialized Models
 
 This directory contains experimental, hand-tuned implementations for a small number of selected models. Each subdirectory targets a specific combination of model architecture (including all tensor shapes), quantization scheme, attention backend, and hardware.
 

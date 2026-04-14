@@ -12,16 +12,22 @@ MTP is supported.
 ## Usage
 
 ```bash
+export VLLM_USE_SPECIALIZED_MODELS=1
+export VLLM_USE_V2_MODEL_RUNNER=1
+export TRTLLM_ENABLE_PDL=1
+
+NUM_GPUS=4
+
 # With TP
-VLLM_USE_SPECIALIZED_MODELS=1 VLLM_USE_V2_MODEL_RUNNER=1 vllm serve nvidia/DeepSeek-V3.2-NVFP4 \
-    -tp 8 \
+vllm serve nvidia/DeepSeek-V3.2-NVFP4 \
+    -tp 4 \
     --compilation-config '{"max_cudagraph_capture_size": 1024}' \
     --speculative-config '{"method": "mtp", "num_speculative_tokens": 1}' \
     --kernel-config.enable_flashinfer_autotune=False
 
 # With attention DP + MoE EP
-VLLM_USE_SPECIALIZED_MODELS=1 VLLM_USE_V2_MODEL_RUNNER=1 vllm serve nvidia/DeepSeek-V3.2-NVFP4 \
-    -dp 8 -ep \
+vllm serve nvidia/DeepSeek-V3.2-NVFP4 \
+    -dp $NUM_GPUS -ep \
     --compilation-config '{"max_cudagraph_capture_size": 1024}' \
     --speculative-config '{"method": "mtp", "num_speculative_tokens": 1}' \
     --kernel-config.enable_flashinfer_autotune=False
