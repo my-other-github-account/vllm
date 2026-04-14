@@ -45,17 +45,22 @@ class MoeReduceScatter:
         self.max_size = ca_comm.max_size
 
         ws = self.world_size
-        # Double-buffer layout: 2 segments, each with ws rank-slots.
-        self.seg_capacity = (self.max_size // 2) & ~15
+        # Use the SECOND half of the IPC buffer (first half reserved for
+        # MoeAllGather) to avoid overlapping writes.
+        half_size = (self.max_size // 2) & ~15
+        self.buffer_offset = half_size
+
+        # Double-buffer layout within our half: 2 segments, each ws rank-slots.
+        self.seg_capacity = (half_size // 2) & ~15
         self.rank_stride = (self.seg_capacity // ws) & ~15
         self.max_per_rank = self.rank_stride
 
-        # Buffer pointer array on device.
+        # Buffer pointer array on device — offset to our half.
         self._buf_ptrs = torch.zeros(
             8, dtype=torch.int64, device=f"cuda:{self.device.index}"
         )
         for i in range(ws):
-            self._buf_ptrs[i] = self.buffer_ptrs[i]
+            self._buf_ptrs[i] = self.buffer_ptrs[i] + self.buffer_offset
         self._buf_ptrs_ptr = self._buf_ptrs.data_ptr()
 
         # Counters: [0]=unused, [1]=seg (0/1), [2]=prev_total_sz.
@@ -64,9 +69,9 @@ class MoeReduceScatter:
         )
         self._counters_ptr = self._counters.data_ptr()
 
-        # Initialize both segments with sentinels.
+        # Initialize our half with sentinels.
         lib = _load_lib()
-        lib.lamport_init(self.buffer_ptrs[self.rank], self.max_size)
+        lib.lamport_init(self.buffer_ptrs[self.rank] + self.buffer_offset, half_size)
         torch.accelerator.synchronize(self.device)
 
     def reduce_scatter(

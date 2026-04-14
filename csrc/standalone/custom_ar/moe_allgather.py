@@ -52,14 +52,17 @@ class MoeAllGather:
         ws = self.world_size
         # Double-buffer layout: 2 segments, each with ws rank-slots.
         # Safe because kernels in the same stream are serialized, and the
-        # Lamport poll ensures all cross-GPU pushes complete before the
-        # kernel returns.
+        # Use the FIRST half of the IPC buffer (second half reserved for
+        # MoeReduceScatter) to avoid overlapping writes.
+        half_size = (self.max_size // 2) & ~15
+
+        # Double-buffer layout within our half: 2 segments, each ws rank-slots.
         # seg_capacity and rank_stride are 16-byte aligned.
-        self.seg_capacity = (self.max_size // 2) & ~15
+        self.seg_capacity = (half_size // 2) & ~15
         self.rank_stride = (self.seg_capacity // ws) & ~15
         self.max_per_rank = self.rank_stride  # max packed bytes per rank
 
-        # Buffer pointer array on device.
+        # Buffer pointer array on device (no offset — first half).
         self._buf_ptrs = torch.zeros(
             8, dtype=torch.int64, device=f"cuda:{self.device.index}"
         )
@@ -67,15 +70,15 @@ class MoeAllGather:
             self._buf_ptrs[i] = self.buffer_ptrs[i]
         self._buf_ptrs_ptr = self._buf_ptrs.data_ptr()
 
-        # Counters on device: [0]=unused, [1]=ring index (0/1/2), [2]=prev_total_sz.
+        # Counters on device: [0]=unused, [1]=seg (0/1), [2]=prev_total_sz.
         self._counters = torch.zeros(
             3, dtype=torch.int32, device=f"cuda:{self.device.index}"
         )
         self._counters_ptr = self._counters.data_ptr()
 
-        # Initialize ALL segments with sentinel values.
+        # Initialize our half with sentinel values.
         lib = _load_lib()
-        lib.lamport_init(self.buffer_ptrs[self.rank], self.max_size)
+        lib.lamport_init(self.buffer_ptrs[self.rank], half_size)
         torch.accelerator.synchronize(self.device)
 
     def gather(
