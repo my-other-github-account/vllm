@@ -281,6 +281,37 @@ class CustomAllreduce:
             # latency) compared to the performance gain of using custom kernels
             return self.all_reduce(input, registered=False)
 
+    def reduce_scatter(
+        self,
+        inp: torch.Tensor,
+        *,
+        out: torch.Tensor | None = None,
+        registered: bool = False,
+    ) -> torch.Tensor:
+        if out is None:
+            out_shape = (inp.shape[0] // self.world_size, *inp.shape[1:])
+            out = torch.empty(out_shape, dtype=inp.dtype, device=inp.device)
+        if registered:
+            ops.reduce_scatter(self._ptr, inp, out, 0, 0)
+        else:
+            ops.reduce_scatter(
+                self._ptr, inp, out, self.buffer_ptrs[self.rank], self.max_size
+            )
+        return out
+
+    def custom_reduce_scatter(self, input: torch.Tensor) -> torch.Tensor | None:
+        """The main reduce_scatter API that provides support for cuda graph."""
+        if self.disabled or not self.should_custom_ar(input):
+            return None
+        if self._IS_CAPTURING:
+            if torch.cuda.is_current_stream_capturing():
+                return self.reduce_scatter(input, registered=True)
+            else:
+                out_shape = (input.shape[0] // self.world_size, *input.shape[1:])
+                return torch.empty(out_shape, dtype=input.dtype, device=input.device)
+        else:
+            return self.reduce_scatter(input, registered=False)
+
     def close(self):
         if not self.disabled and self._ptr:
             if ops is not None:

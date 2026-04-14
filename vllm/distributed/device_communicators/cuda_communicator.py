@@ -41,8 +41,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             global_ranks,
             global_world_size,
         )
-        if "tp" not in unique_name:
-            # custom allreduce or torch symm mem can be used only by tp
+        if not any(tag in unique_name for tag in ("tp", "dp", "ep")):
             use_custom_allreduce = False
             use_torch_symm_mem = False
             use_flashinfer_allreduce = False
@@ -50,8 +49,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
             from vllm.distributed.parallel_state import _ENABLE_CUSTOM_ALL_REDUCE
 
             use_custom_allreduce = _ENABLE_CUSTOM_ALL_REDUCE
-            use_torch_symm_mem = envs.VLLM_ALLREDUCE_USE_SYMM_MEM
-            use_flashinfer_allreduce = envs.VLLM_ALLREDUCE_USE_FLASHINFER
+            use_torch_symm_mem = (
+                "tp" in unique_name and envs.VLLM_ALLREDUCE_USE_SYMM_MEM
+            )
+            use_flashinfer_allreduce = (
+                "tp" in unique_name and envs.VLLM_ALLREDUCE_USE_FLASHINFER
+            )
 
         self.use_custom_allreduce = use_custom_allreduce
         self.use_torch_symm_mem = use_torch_symm_mem
@@ -238,8 +241,6 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
     def reduce_scatter(self, input_: torch.Tensor, dim: int = -1):
         world_size = self.world_size
-        pynccl_comm = self.pynccl_comm
-        assert pynccl_comm is not None
         if dim < 0:
             # Convert negative dim to positive.
             dim += input_.dim()
@@ -249,6 +250,10 @@ class CudaCommunicator(DeviceCommunicatorBase):
         input_tensor = input_.movedim(0, dim).contiguous()
 
         assert input_tensor.shape[0] % world_size == 0
+
+        # TODO: custom reduce_scatter disabled for now — needs testing
+        # with torch.compile + CUDA graph pipeline before enabling.
+
         chunk_size = input_tensor.shape[0] // world_size
         output_shape = (chunk_size,) + input_tensor.shape[1:]
 
@@ -256,6 +261,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
             output_shape, dtype=input_tensor.dtype, device=input_tensor.device
         )
 
+        pynccl_comm = self.pynccl_comm
+        assert pynccl_comm is not None
         pynccl_comm.reduce_scatter(output, input_tensor)
 
         # Reshape before returning

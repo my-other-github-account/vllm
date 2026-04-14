@@ -16,8 +16,146 @@ from vllm.utils.flashinfer import (
     has_flashinfer_nvlink_two_sided,
 )
 from vllm.utils.import_utils import has_deep_ep, has_mori
+from vllm.utils.torch_utils import direct_register_custom_op
 
 from .base_device_communicator import All2AllManagerBase, Cache
+
+logger = init_logger(__name__)
+
+# ---- MoE dispatch custom op (torch.compile-safe) -----------------------
+# Registered as torch.ops.vllm.moe_dispatch so torch.compile treats it as
+# opaque.  The real implementation decides custom kernel vs NCCL at runtime
+# based on tensor sizes.
+
+# Global reference to the MoeAllGather instance per group, set lazily.
+_moe_ag_instances: dict[str, Any] = {}
+
+
+def _get_or_create_moe_ag(group_name: str):
+    """Get or lazily create the MoeAllGather for this group."""
+    if group_name in _moe_ag_instances:
+        return _moe_ag_instances[group_name]
+
+    from vllm.distributed.parallel_state import _groups
+
+    group_ref = _groups.get(group_name)
+    if group_ref is None:
+        return None
+    group = group_ref()
+    if group is None:
+        return None
+
+    dc = getattr(group, "device_communicator", None)
+    if dc is None:
+        return None
+    ca = getattr(dc, "ca_comm", None)
+    if ca is None or ca.disabled or not getattr(ca, "fully_connected", False):
+        _moe_ag_instances[group_name] = None
+        return None
+
+    try:
+        from vllm.jit_kernels.moe_all_gather.moe_allgather import (
+            MoeAllGather,
+        )
+
+        ag = MoeAllGather(ca)
+        _moe_ag_instances[group_name] = ag
+        logger.info("MoE custom all-gather initialized for group %s", group_name)
+        return ag
+    except ImportError:
+        _moe_ag_instances[group_name] = None
+        return None
+
+
+def moe_dispatch(
+    tensors: list[torch.Tensor],
+    group_name: str,
+) -> list[torch.Tensor]:
+    """All-gather a list of tensors across the EP/DP group.
+
+    Tries the custom one-shot P2P kernel first; falls back to NCCL
+    all_gatherv if the custom kernel is unavailable or tensors are too large.
+    """
+    from vllm.distributed.parallel_state import _groups
+
+    group_ref = _groups.get(group_name)
+    assert group_ref is not None
+    group = group_ref()
+    assert group is not None
+
+    # Try custom kernel for small, uniform-sized batches.
+    n = len(tensors)
+    if 2 <= n <= 4:
+        moe_ag = _get_or_create_moe_ag(group_name)
+        if moe_ag is not None:
+            ws = moe_ag.world_size
+            # Compute packed size.
+            total_bytes = 0
+            ok = True
+            for t in tensors:
+                if not t.is_contiguous():
+                    ok = False
+                    break
+                nbytes = t.numel() * t.element_size()
+                if nbytes % 16 != 0:
+                    ok = False
+                    break
+                total_bytes = (total_bytes + 15) & ~15
+                total_bytes += nbytes
+
+            max_bytes = min(1 * 1024 * 1024, moe_ag.max_size)
+            if ok and total_bytes <= max_bytes:
+                outputs = [
+                    torch.empty(
+                        (t.shape[0] * ws, *t.shape[1:]), dtype=t.dtype, device=t.device
+                    )
+                    for t in tensors
+                ]
+
+                from vllm.jit_kernels.moe_all_gather.moe_allgather import (
+                    _load_lib,
+                )
+
+                lib = _load_lib()
+                lib.moe_all_gather(
+                    moe_ag._rank_data_ptr,
+                    moe_ag._rank_signals_ptr,
+                    moe_ag._self_signal_ptr,
+                    moe_ag.rank,
+                    ws,
+                    tensors,
+                    outputs,
+                )
+                return outputs
+
+    # Fallback: NCCL all_gatherv.
+    return group.device_communicator.all_gatherv(tensors, dim=0)
+
+
+def moe_dispatch_fake(
+    tensors: list[torch.Tensor],
+    group_name: str,
+) -> list[torch.Tensor]:
+    """Fake impl for torch.compile tracing — returns empty tensors of the
+    correct gathered shape."""
+    from vllm.distributed.parallel_state import _groups
+
+    group_ref = _groups.get(group_name)
+    assert group_ref is not None
+    group = group_ref()
+    ws = group.world_size if group is not None else 1
+    return [
+        torch.empty((t.shape[0] * ws, *t.shape[1:]), dtype=t.dtype, device=t.device)
+        for t in tensors
+    ]
+
+
+direct_register_custom_op(
+    op_name="moe_dispatch",
+    op_func=moe_dispatch,
+    fake_impl=moe_dispatch_fake,
+    mutates_args=[],
+)
 
 if has_flashinfer_nvlink_two_sided():
     from flashinfer.comm import Mapping  # type: ignore[import-not-found]
@@ -155,6 +293,131 @@ class AgRsAll2AllManager(All2AllManagerBase):
 
     def __init__(self, cpu_group, tcp_store_group=None):
         super().__init__(cpu_group, tcp_store_group)
+        self._moe_ag = None  # lazy: MoeAllGather instance
+
+    def _get_moe_allgather(self, dist_group):
+        """Lazily build the standalone MoE all-gather kernel wrapper."""
+        if self._moe_ag is not None:
+            return self._moe_ag
+
+        import logging
+
+        log = logging.getLogger(__name__)
+
+        # Check prerequisites: intra-node, NVLink, ca_comm available.
+        if self.internode:
+            log.warning("MoE AG: skipped (internode)")
+            return None
+        dc = getattr(dist_group, "device_communicator", None)
+        if dc is None:
+            log.warning("MoE AG: skipped (no device_communicator)")
+            return None
+        ca = getattr(dc, "ca_comm", None)
+        if ca is None:
+            log.warning("MoE AG: skipped (ca_comm is None)")
+            return None
+        if ca.disabled:
+            log.warning("MoE AG: skipped (ca_comm disabled)")
+            return None
+        if not getattr(ca, "fully_connected", False):
+            log.warning("MoE AG: skipped (not fully_connected)")
+            return None
+
+        try:
+            from vllm.jit_kernels.moe_all_gather.moe_allgather import (  # type: ignore
+                MoeAllGather,
+            )
+        except ImportError as e:
+            log.warning("MoE AG: skipped (import failed: %s)", e)
+            return None
+
+        self._moe_ag = MoeAllGather(ca)
+        log.info("MoE AG: custom kernel initialized successfully")
+        return self._moe_ag
+
+    # ---- helpers --------------------------------------------------------
+
+    def _custom_all_gather(
+        self,
+        dist_group,
+        tensors: list[torch.Tensor],
+        sizes: list[int],
+    ) -> list[torch.Tensor] | None:
+        """Try the one-shot P2P MoE all-gather kernel.  Returns None on
+        fallback (kernel unavailable, too many tensors, etc.)."""
+        import logging
+
+        _log = logging.getLogger(__name__)
+        _dbg = getattr(self, "_ag_dbg_count", 0)
+
+        n = len(tensors)
+        if n < 2 or n > 4:
+            if _dbg < 10:
+                _log.warning(f"MoE AG: n={n} (need 2-4)")
+                self._ag_dbg_count = _dbg + 1
+            return None
+        if any(s != sizes[0] for s in sizes[1:]):
+            if _dbg < 10:
+                _log.warning(f"MoE AG: non-uniform sizes {sizes}")
+                self._ag_dbg_count = _dbg + 1
+            return None
+        moe_ag = self._get_moe_allgather(dist_group)
+        if moe_ag is None:
+            return None
+
+        ws = moe_ag.world_size
+
+        total_bytes = 0
+        for t in tensors:
+            if not t.is_contiguous():
+                if _dbg < 10:
+                    _log.warning(f"MoE AG: non-contiguous {t.shape} {t.stride()}")
+                    self._ag_dbg_count = _dbg + 1
+                return None
+            nbytes = t.numel() * t.element_size()
+            if nbytes % 16 != 0:
+                if _dbg < 10:
+                    _log.warning(
+                        f"MoE AG: unaligned {nbytes}B shape={t.shape} dtype={t.dtype}"
+                    )
+                    self._ag_dbg_count = _dbg + 1
+                return None
+            total_bytes = (total_bytes + 15) & ~15
+            total_bytes += nbytes
+
+        if total_bytes > moe_ag.max_size:
+            if _dbg < 10:
+                _log.warning(
+                    f"MoE AG: too large {total_bytes} > {moe_ag.max_size} "
+                    f"n={n} shapes={[t.shape for t in tensors]}"
+                )
+                self._ag_dbg_count = _dbg + 1
+            return None
+
+        # Allocate per-tensor outputs.
+        outputs = [
+            torch.empty((t.shape[0] * ws, *t.shape[1:]), dtype=t.dtype, device=t.device)
+            for t in tensors
+        ]
+
+        from vllm.jit_kernels.moe_all_gather.moe_allgather import (  # type: ignore
+            _load_lib,
+        )
+
+        lib = _load_lib()
+        lib.moe_all_gather(
+            moe_ag._rank_data_ptr,
+            moe_ag._rank_signals_ptr,
+            moe_ag._self_signal_ptr,
+            moe_ag.rank,
+            ws,
+            tensors,
+            outputs,
+        )
+
+        return outputs
+
+    # ---- public API -----------------------------------------------------
 
     def dispatch_router_logits(
         self,
@@ -176,19 +439,22 @@ class AgRsAll2AllManager(All2AllManagerBase):
         dist_group = get_ep_group() if is_sequence_parallel else get_dp_group()
         assert sizes[dist_group.rank_in_group] == hidden_states.shape[0]
 
-        tensors_to_gather = [hidden_states, router_logits]
+        tensors = [hidden_states, router_logits]
         if extra_tensors is not None:
-            tensors_to_gather.extend(extra_tensors)
+            tensors.extend(extra_tensors)
 
-        gathered_tensors = dist_group.all_gatherv(
-            tensors_to_gather,
-            dim=0,
-            sizes=sizes,
-        )
+        # Use custom op so torch.compile treats this as opaque.
+        # Runtime decides custom kernel vs NCCL based on tensor sizes.
+        if all(s == sizes[0] for s in sizes):
+            gathered = torch.ops.vllm.moe_dispatch(
+                tensors, group_name=dist_group.unique_name
+            )
+        else:
+            gathered = dist_group.all_gatherv(tensors, dim=0, sizes=sizes)
 
         if extra_tensors is not None:
-            return (gathered_tensors[0], gathered_tensors[1], gathered_tensors[2:])
-        return gathered_tensors[0], gathered_tensors[1]
+            return (gathered[0], gathered[1], gathered[2:])
+        return gathered[0], gathered[1]
 
     def dispatch(
         self,
@@ -202,7 +468,7 @@ class AgRsAll2AllManager(All2AllManagerBase):
         | tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]]
     ):
         """
-        Gather hidden_states and router_logits from all dp ranks.
+        Gather hidden_states, topk_weights, topk_ids from all dp ranks.
         """
         dp_metadata = get_forward_context().dp_metadata
         assert dp_metadata is not None
@@ -211,24 +477,24 @@ class AgRsAll2AllManager(All2AllManagerBase):
         dist_group = get_ep_group() if is_sequence_parallel else get_dp_group()
         assert sizes[dist_group.rank_in_group] == hidden_states.shape[0]
 
-        tensors_to_gather = [hidden_states, topk_weights, topk_ids]
+        tensors = [hidden_states, topk_weights, topk_ids]
         if extra_tensors is not None:
-            tensors_to_gather.extend(extra_tensors)
+            tensors.extend(extra_tensors)
 
-        gathered_tensors = dist_group.all_gatherv(
-            tensors_to_gather,
-            dim=0,
-            sizes=sizes,
-        )
+        if all(s == sizes[0] for s in sizes):
+            gathered = torch.ops.vllm.moe_dispatch(
+                tensors, group_name=dist_group.unique_name
+            )
+        else:
+            gathered = dist_group.all_gatherv(tensors, dim=0, sizes=sizes)
 
-        hidden_states = gathered_tensors[0]
-        topk_weights = gathered_tensors[1]
-        topk_ids = gathered_tensors[2]
+        hidden_states = gathered[0]
+        topk_weights = gathered[1]
+        topk_ids = gathered[2]
 
         if extra_tensors is None:
             return hidden_states, topk_weights, topk_ids
-
-        return hidden_states, topk_weights, topk_ids, gathered_tensors[3:]
+        return hidden_states, topk_weights, topk_ids, gathered[3:]
 
     def combine(
         self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False
@@ -246,7 +512,8 @@ class AgRsAll2AllManager(All2AllManagerBase):
         return hidden_states
 
     def destroy(self):
-        pass
+        if self._moe_ag is not None:
+            self._moe_ag = None
 
 
 class DeepEPAll2AllManagerBase(All2AllManagerBase):

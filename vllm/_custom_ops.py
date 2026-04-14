@@ -2797,6 +2797,16 @@ def all_reduce(
     torch.ops._C_custom_ar.all_reduce(fa, inp, out, reg_buffer, reg_buffer_sz_bytes)
 
 
+def reduce_scatter(
+    fa: int,
+    inp: torch.Tensor,
+    out: torch.Tensor,
+    reg_buffer: int,
+    reg_buffer_sz_bytes: int,
+) -> None:
+    torch.ops._C_custom_ar.reduce_scatter(fa, inp, out, reg_buffer, reg_buffer_sz_bytes)
+
+
 def dispose(fa: int) -> None:
     torch.ops._C_custom_ar.dispose(fa)
 

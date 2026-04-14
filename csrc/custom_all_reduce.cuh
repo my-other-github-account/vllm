@@ -313,6 +313,24 @@ __global__ void __launch_bounds__(512, 1)
   barrier_at_end<ngpus, true>(sg, self_sg, rank);
 }
 
+template <typename T, int ngpus>
+__global__ void __launch_bounds__(512, 1)
+    cross_device_reduce_scatter(RankData* _dp, RankSignals sg, Signal* self_sg,
+                                T* __restrict__ result, int rank,
+                                int chunk_size) {
+  using P = typename packed_t<T>::P;
+  using A = typename packed_t<T>::A;
+  auto dp = *_dp;
+  int offset = rank * chunk_size;
+  barrier_at_start<ngpus>(sg, self_sg, rank);
+  for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < chunk_size;
+       idx += gridDim.x * blockDim.x) {
+    ((P*)result)[idx] =
+        packed_reduce<P, ngpus, A>((const P**)&dp.ptrs[0], offset + idx);
+  }
+  barrier_at_end<ngpus, true>(sg, self_sg, rank);
+}
+
 template <typename P>
 DINLINE P* get_tmp_buf(Signal* sg) {
   return (P*)(((Signal*)sg) + 1);
@@ -613,6 +631,69 @@ class CustomAllreduce {
             std::to_string(world_size_));
     }
 #undef REDUCE_CASE
+#undef KL
+  }
+
+  template <typename T>
+  void reduce_scatter(cudaStream_t stream, T* input, T* output, int size,
+                      int threads = 512, int block_limit = defaultBlockLimit) {
+    auto d = packed_t<T>::P::size;
+    if (size % d != 0)
+      throw std::runtime_error(
+          "custom reduce_scatter currently requires input length to be "
+          "multiple of " +
+          std::to_string(d));
+    if (size % world_size_ != 0)
+      throw std::runtime_error(
+          "custom reduce_scatter requires input length to be divisible by "
+          "world_size");
+    if (block_limit > kMaxBlocks)
+      throw std::runtime_error("max supported block limit is " +
+                               std::to_string(kMaxBlocks) + ". Got " +
+                               std::to_string(block_limit));
+
+    RankData* ptrs;
+    cudaStreamCaptureStatus status;
+    CUDACHECK(cudaStreamIsCapturing(stream, &status));
+    if (status == cudaStreamCaptureStatusActive) {
+      ptrs = d_rank_data_base_ + graph_unreg_buffers_.size();
+      graph_unreg_buffers_.push_back(input);
+    } else {
+      auto it = buffers_.find(input);
+      if (it == buffers_.end())
+        throw std::runtime_error(
+            "buffer address " +
+            std::to_string(reinterpret_cast<uint64_t>(input)) +
+            " is not registered!");
+      ptrs = it->second;
+    }
+
+    int chunk_size = size / world_size_ / d;
+    int blocks = std::min(block_limit, (chunk_size + threads - 1) / threads);
+
+#define KL(ngpus)                                                        \
+  cross_device_reduce_scatter<T, ngpus><<<blocks, threads, 0, stream>>>( \
+      ptrs, sg_, self_sg_, output, rank_, chunk_size);
+
+    switch (world_size_) {
+      case 2:
+        KL(2);
+        break;
+      case 4:
+        KL(4);
+        break;
+      case 6:
+        KL(6);
+        break;
+      case 8:
+        KL(8);
+        break;
+      default:
+        throw std::runtime_error(
+            "custom reduce_scatter only supports num gpus in (2,4,6,8). "
+            "Actual num gpus = " +
+            std::to_string(world_size_));
+    }
 #undef KL
   }
 
