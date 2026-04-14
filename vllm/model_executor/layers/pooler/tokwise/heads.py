@@ -82,14 +82,22 @@ class TokenEmbeddingPoolerHead(TokenPoolerHead):
 
         # doing projection for all tokens in the batch
         embeddings = self._project_batch(pooled_data.values)
-        if self._has_uniform_postprocess(pooling_params):
-            embeddings = self._postprocess_embeddings(embeddings, pooling_params[0])
+        active_pooling_params = self._get_present_pooling_params(
+            pooled_data, pooling_params
+        )
+        if self._has_uniform_postprocess(active_pooling_params):
+            if active_pooling_params:
+                embeddings = self._postprocess_embeddings(
+                    embeddings, active_pooling_params[0]
+                )
             return pooled_data.with_values(embeddings).split()
 
         # can't apply the same postprocess, doing it separately
         pooled_outputs = pooled_data.with_values(embeddings).split()
         return [
-            self._postprocess_embeddings(output, pooling_param)
+            None
+            if output is None
+            else self._postprocess_embeddings(output, pooling_param)
             for output, pooling_param in zip(pooled_outputs, pooling_params)
         ]
 
@@ -131,6 +139,19 @@ class TokenEmbeddingPoolerHead(TokenPoolerHead):
             and bool(param.use_activation) == first_use_activation
             for param in pooling_params[1:]
         )
+
+    def _get_present_pooling_params(
+        self,
+        pooled_data: RaggedTokenBatch,
+        pooling_params: list[PoolingParams],
+    ) -> list[PoolingParams]:
+        if pooled_data.is_none_cpu is None:
+            return pooling_params
+        return [
+            pooling_param
+            for pooling_param, is_none in zip(pooling_params, pooled_data.is_none_cpu)
+            if not bool(is_none)
+        ]
 
 
 class TokenClassifierPoolerHead(TokenPoolerHead):

@@ -21,16 +21,24 @@ TokenPoolingMethodOutputItem: TypeAlias = torch.Tensor | None
 class RaggedTokenBatch:
     values: torch.Tensor
     cu_lengths_cpu: torch.Tensor
+    is_none_cpu: torch.Tensor | None = None
 
     @classmethod
     def from_lengths(
         cls,
         values: torch.Tensor,
         lengths_cpu: torch.Tensor,
+        is_none_cpu: torch.Tensor | None = None,
     ) -> "RaggedTokenBatch":
+        if is_none_cpu is not None:
+            assert is_none_cpu.shape == lengths_cpu.shape, (
+                "is_none_cpu must match lengths_cpu shape: "
+                f"{tuple(is_none_cpu.shape)} != {tuple(lengths_cpu.shape)}."
+            )
         return cls(
             values=values,
             cu_lengths_cpu=_make_cu_lengths_cpu(lengths_cpu),
+            is_none_cpu=is_none_cpu,
         )
 
     @property
@@ -48,15 +56,25 @@ class RaggedTokenBatch:
         return RaggedTokenBatch(
             values=values,
             cu_lengths_cpu=self.cu_lengths_cpu,
+            is_none_cpu=self.is_none_cpu,
         )
 
     def split(self) -> list[TokenPoolingMethodOutputItem]:
         outputs = list[TokenPoolingMethodOutputItem]()
         cu_lengths_cpu = self.cu_lengths_cpu
+        is_none_cpu = self.is_none_cpu
 
         for i in range(self.num_items):
             start = int(cu_lengths_cpu[i])
             end = int(cu_lengths_cpu[i + 1])
+            if is_none_cpu is not None and bool(is_none_cpu[i]):
+                if start != end:
+                    raise ValueError(
+                        "Items materialized as None must have zero length: "
+                        f"{start} != {end}."
+                    )
+                outputs.append(None)
+                continue
             outputs.append(self.values[start:end])
 
         return outputs
@@ -108,41 +126,56 @@ class AllPool(TokenPoolingMethod):
         pooling_metadata: PoolingMetadata,
     ) -> TokenPoolingMethodOutput:
         pooling_cursor = pooling_metadata.get_pooling_cursor()
-        if not self.enable_chunked_prefill:
-            return RaggedTokenBatch.from_lengths(
+        if self.enable_chunked_prefill:
+            hidden_states_lst = RaggedTokenBatch.from_lengths(
                 values=hidden_states,
                 lengths_cpu=pooling_cursor.num_scheduled_tokens_cpu,
+            ).split()
+
+            pooling_states = pooling_metadata.pooling_states
+
+            # If chunked_prefill is enabled
+            # 1. first store the chunked hidden_states in
+            # pooling_states.hidden_states_cache
+            for p, hs_chunk in zip(pooling_states, hidden_states_lst):
+                p.hidden_states_cache.append(hs_chunk)
+
+            # 2. once prefill is finished, flatten the finished requests into a
+            # ragged batch while preserving unfinished slots as None-equivalents.
+            lengths_cpu = torch.zeros(
+                len(pooling_states), dtype=torch.int64, device="cpu"
             )
-
-        hidden_states_lst = [
-            hidden_states[first : last + 1]
-            for first, last in zip(
-                pooling_cursor.first_token_indices_gpu.tolist(),
-                pooling_cursor.last_token_indices_gpu.tolist(),
+            is_none_cpu = torch.ones(
+                len(pooling_states), dtype=torch.bool, device="cpu"
             )
-        ]
+            finished_values = list[torch.Tensor]()
+            for i, (p, finished) in enumerate(
+                zip(pooling_states, pooling_cursor.is_finished())
+            ):
+                if not finished:
+                    continue
 
-        pooling_states = pooling_metadata.pooling_states
-
-        # If chunked_prefill is enabled
-        # 1. first store the chunked hidden_states in pooling_states.hidden_states_cache
-        for p, hs_chunk in zip(pooling_states, hidden_states_lst):
-            p.hidden_states_cache.append(hs_chunk)
-
-        # 2. Once prefill is finished, send hidden_states_cache to PoolerHead
-        output_list = list[TokenPoolingMethodOutputItem]()
-        for p, finished in zip(pooling_states, pooling_cursor.is_finished()):
-            if finished:
                 hidden_states_cache = p.hidden_states_cache
-                if len(hidden_states_cache) == 1:
-                    output_list.append(hidden_states_cache[0])
-                else:
-                    output_list.append(torch.concat(hidden_states_cache, dim=0))
+                lengths_cpu[i] = sum(chunk.shape[0] for chunk in hidden_states_cache)
+                is_none_cpu[i] = False
+                finished_values.extend(hidden_states_cache)
                 p.clean()
-            else:
-                output_list.append(None)
 
-        return output_list
+            values = (
+                torch.concat(finished_values, dim=0)
+                if finished_values
+                else hidden_states[:0]
+            )
+        else:
+            values = hidden_states
+            lengths_cpu = pooling_cursor.num_scheduled_tokens_cpu
+            is_none_cpu = None
+
+        return RaggedTokenBatch.from_lengths(
+            values=values,
+            lengths_cpu=lengths_cpu,
+            is_none_cpu=is_none_cpu,
+        )
 
 
 class StepPool(AllPool):
