@@ -249,7 +249,7 @@ class DeepseekV32DecoderLayer(nn.Module):
             prefix=f"{prefix}.self_attn.fused_qkv_a_proj",
         )
 
-        # MLA Attention — disable AllReduce in o_proj when using fused path
+        # MLA Attention
         self.attn = DeepseekV32MLAAttention(
             vllm_config=vllm_config,
             config=config,
@@ -309,10 +309,20 @@ class DeepseekV32DecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
-        # Step 1. hidden_states -> q_c, kv_c, k_pe, index_k, index_weights
-        step1_out = torch.mm(hidden_states, self._fused_step1_hidden_w.T)
-        q_c, kv_c, k_pe, index_k, index_weights = step1_out.split(
-            self._step1_split_sizes,
+        # Step 1. hidden_states -> q_c, kv_c, k_pe
+        #                       -> index_k, index_weights
+        out = self.self_attn.fused_qkv_a_proj(hidden_states)
+        if isinstance(out, tuple):
+            out = out[0]
+
+        q_c, kv_c, k_pe = out.split(
+            [self.q_lora_rank, self.kv_lora_rank, self.qk_rope_head_dim],
+            dim=-1,
+        )
+        index_k, index_weights = torch.mm(
+            hidden_states, self._fused_indexer_weights.T
+        ).split(
+            self._indexer_weights_split_sizes,
             dim=-1,
         )
 
@@ -347,25 +357,18 @@ class DeepseekV32DecoderLayer(nn.Module):
         Call after model weights are loaded.
         """
         attn = self.attn
-        qkv_a = self.self_attn.fused_qkv_a_proj.weight.data  # [2112, 7168]
         wk = attn.indexer_wk.weight.data  # [128, 7168]
         wp = attn.indexer_weights_proj.weight.data  # [64, 7168]
-        if not (qkv_a.dtype == wk.dtype == wp.dtype):
+        if wk.dtype != wp.dtype:
             raise ValueError(
-                "Cannot fuse Step 1 weights: expected matching dtypes for "
-                "fused_qkv_a_proj, indexer_wk, and indexer_weights_proj."
+                "Cannot fuse indexer weights: expected matching dtypes for "
+                "indexer_wk and indexer_weights_proj."
             )
-        self._fused_step1_hidden_w = nn.Parameter(
-            torch.cat([qkv_a, wk, wp], dim=0),  # [2304, 7168]
+        self._fused_indexer_weights = nn.Parameter(
+            torch.cat([wk, wp], dim=0),  # [192, 7168]
             requires_grad=False,
         )
-        self._step1_split_sizes = [
-            self.q_lora_rank,
-            self.kv_lora_rank,
-            self.qk_rope_head_dim,
-            wk.shape[0],
-            wp.shape[0],
-        ]
+        self._indexer_weights_split_sizes = [wk.shape[0], wp.shape[0]]
 
         wq_b = attn.indexer_wq_b.weight.data
         q_b = attn.q_b_proj.weight.data
