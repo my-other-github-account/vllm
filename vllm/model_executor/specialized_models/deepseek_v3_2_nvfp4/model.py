@@ -147,6 +147,5 @@ class DeepseekV32ForCausalLM(nn.Module):
         # Fuse indexer linear weights after loading.
         for layer in self.model.layers:
             layer.fuse_indexer_weights()
-            layer.fuse_shared_expert_act_quant()
 
         return loaded

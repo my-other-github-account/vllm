@@ -150,7 +150,6 @@ class DeepSeekMTP(DeepSeekMTPBase):
         loaded_params = super().load_weights(weights)
         for layer in self.model.layers.values():
             layer.mtp_block.fuse_indexer_weights()
-            layer.mtp_block.fuse_shared_expert_act_quant()
         return loaded_params
 
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
