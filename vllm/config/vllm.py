@@ -474,13 +474,22 @@ class VllmConfig:
         if use_v2_model_runner is not None:
             return use_v2_model_runner
 
-        # ngram / ngram_gpu are not supported by the v2 model runner yet
+        # TODO: ngram / ngram_gpu are not supported by the v2 model runner yet
         if self.speculative_config is not None and (
             self.speculative_config.method in ("ngram", "ngram_gpu")
         ):
             logger.warning_once(
                 "Model runner v2 does not support ngram or ngram_gpu speculative "
                 "decoding; using the v1 model runner instead."
+            )
+            return False
+
+        if self.reasoning_config is not None:
+            # TODO: add reasoning budget enforcement to ModelRunnerV2.
+            logger.warning_once(
+                "Model runner v2 does not yet support reasoning budget "
+                "enforcement; using the v1 model runner instead when "
+                "reasoning parsing is configured."
             )
             return False
 
