@@ -100,6 +100,7 @@ steps:
 
   - group: "Build release Docker images"
     key: "build-release-images"
+    if: build.env("NIGHTLY") == "1"
     steps:
       - label: "Build release image - x86_64 - CUDA 12.9"
         depends_on: ~
@@ -230,6 +231,7 @@ steps:
 
   - group: "Publish release images"
     key: "publish-release-images"
+    if: build.env("NIGHTLY") == "1"
     steps:
       - label: "Create multi-arch manifest - CUDA 12.9"
         depends_on:
@@ -616,6 +618,7 @@ steps:
   # ROCm Job 6: Build ROCm Release Docker Image
   - label: ":docker: Build release image - x86_64 - ROCm"
     id: build-rocm-release-image
+    if: build.env("NIGHTLY") == "1"
     depends_on:
       - step: build-rocm-base-wheels
         allow_failure: false
