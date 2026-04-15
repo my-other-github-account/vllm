@@ -858,6 +858,61 @@ finally:
     if nvml_available:
         pynvml.nvmlShutdown()
 
-CudaPlatform = NvmlCudaPlatform if nvml_available else NonNvmlCudaPlatform
+
+def _is_mig_device() -> bool:
+    """Detect if the current CUDA device is a MIG (Multi-Instance GPU) partition.
+
+    On MIG partitions, most NVML device-level queries fail with
+    NVMLError_NoPermission. This causes PyTorch's CUDACachingAllocator to crash
+    with an internal assert (via expandable_segments) before the real OOM error
+    can surface. It also causes NVML memory queries to report the full GPU's
+    memory instead of the MIG partition's memory.
+
+    Detection methods:
+    1. CUDA_VISIBLE_DEVICES containing MIG UUIDs (MIG-GPU-...)
+    2. Probing NVML device queries for permission errors
+    """
+    # Method 1: Check CUDA_VISIBLE_DEVICES for MIG UUID format
+    cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    if cuda_visible and any(
+        dev.strip().startswith("MIG-") for dev in cuda_visible.split(",")
+    ):
+        logger.info(
+            "Detected MIG device from CUDA_VISIBLE_DEVICES=%s, "
+            "using NonNvmlCudaPlatform to avoid NVML permission errors.",
+            cuda_visible,
+        )
+        return True
+
+    # Method 2: Probe NVML for permission errors (catches MIG even when
+    # CUDA_VISIBLE_DEVICES uses numeric indices mapped by the container runtime)
+    if nvml_available:
+        try:
+            pynvml.nvmlInit()
+            try:
+                handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+                pynvml.nvmlDeviceGetMemoryInfo(handle)
+            except pynvml.NVMLError as e:
+                if "NoPermission" in str(type(e).__name__) or \
+                   "Insufficient Permissions" in str(e):
+                    logger.info(
+                        "Detected MIG device via NVML permission error: %s, "
+                        "using NonNvmlCudaPlatform.", e,
+                    )
+                    return True
+            finally:
+                pynvml.nvmlShutdown()
+        except Exception:
+            pass
+
+    return False
+
+
+_mig_device = _is_mig_device()
+
+if _mig_device:
+    CudaPlatform = NonNvmlCudaPlatform
+else:
+    CudaPlatform = NvmlCudaPlatform if nvml_available else NonNvmlCudaPlatform
 
 CudaPlatform.log_warnings()

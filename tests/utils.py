@@ -383,9 +383,14 @@ class RemoteVLLMServer:
                     total_used = 0
                     device_count = current_platform.device_count()
                     for i in range(device_count):
-                        handle = nvmlDeviceGetHandleByIndex(i)
-                        mem_info = nvmlDeviceGetMemoryInfo(handle)
-                        total_used += mem_info.used
+                        try:
+                            handle = nvmlDeviceGetHandleByIndex(i)
+                            mem_info = nvmlDeviceGetMemoryInfo(handle)
+                            total_used += mem_info.used
+                        except Exception:
+                            # NVML fails on MIG — fall back to torch.cuda
+                            free, total = torch.cuda.mem_get_info(i)
+                            total_used += total - free
                     return total_used
         except Exception as e:
             print(f"[RemoteOpenAIServer] Could not query GPU memory: {e}")
@@ -1202,7 +1207,7 @@ def wait_for_gpu_memory_to_clear(
 ) -> None:
     assert threshold_bytes is not None or threshold_ratio is not None
     # Use nvml instead of pytorch to reduce measurement error from torch cuda
-    # context.
+    # context. Falls back to torch.cuda on MIG where NVML lacks permissions.
     devices = get_physical_device_indices(devices)
     start_time = time.time()
     while True:
@@ -1215,10 +1220,17 @@ def wait_for_gpu_memory_to_clear(
                 gb_used = mem_info["vram_used"] / 2**10
                 gb_total = mem_info["vram_total"] / 2**10
             else:
-                dev_handle = nvmlDeviceGetHandleByIndex(device)
-                mem_info = nvmlDeviceGetMemoryInfo(dev_handle)
-                gb_used = mem_info.used / 2**30
-                gb_total = mem_info.total / 2**30
+                try:
+                    dev_handle = nvmlDeviceGetHandleByIndex(device)
+                    mem_info = nvmlDeviceGetMemoryInfo(dev_handle)
+                    gb_used = mem_info.used / 2**30
+                    gb_total = mem_info.total / 2**30
+                except Exception:
+                    # NVML fails on MIG with NoPermission — fall back to
+                    # torch.cuda which correctly reports MIG partition memory.
+                    free, total = torch.cuda.mem_get_info(device)
+                    gb_total = total / 2**30
+                    gb_used = (total - free) / 2**30
             output_raw[device] = (gb_used, gb_total)
             output[device] = f"{gb_used:.02f}/{gb_total:.02f}"
 
