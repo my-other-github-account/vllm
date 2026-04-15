@@ -69,8 +69,7 @@ class CustomMultiprocExecutor(MultiprocExecutor):
 
 
 CustomMultiprocExecutorAsync = CustomMultiprocExecutor
-# Not on the MRv2 oracle whitelist; keeps these executor plumbing tests on v1.
-MODEL = "facebook/opt-125m"
+MODEL = "Qwen/Qwen3-0.6B"
 
 
 def test_custom_executor_type_checking():

@@ -25,11 +25,7 @@ def chat_server_with_force_include_usage(request):
         "0.2",
     ]
 
-    with RemoteOpenAIServer(
-        "Qwen/Qwen3-0.6B",
-        args,
-        auto_port=False,
-    ) as remote_server:
+    with RemoteOpenAIServer("Qwen/Qwen3-0.6B", args, auto_port=False) as remote_server:
         yield remote_server
 
 
