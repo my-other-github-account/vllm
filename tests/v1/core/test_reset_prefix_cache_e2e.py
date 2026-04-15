@@ -14,9 +14,9 @@ PROMPTS = [
 def test_reset_prefix_cache_e2e(monkeypatch):
     # "spawn" is required for test to be deterministic
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
     engine_args = EngineArgs(
-        model="Qwen/Qwen3-0.6B",
+        # Not on the MRv2 oracle whitelist; avoids forcing VLLM_USE_V2_MODEL_RUNNER.
+        model="facebook/opt-125m",
         gpu_memory_utilization=0.2,
         async_scheduling=True,
         max_num_batched_tokens=32,

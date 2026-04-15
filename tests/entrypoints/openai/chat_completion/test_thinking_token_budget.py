@@ -28,9 +28,7 @@ def server():
         "0.4",
         "--no-async-scheduling",
     ]
-    with RemoteOpenAIServer(
-        MODEL_NAME, args, env_dict={"VLLM_USE_V2_MODEL_RUNNER": "0"}
-    ) as remote_server:
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 
 
@@ -46,9 +44,7 @@ def server_with_auto_reasoning_config():
         "0.4",
         "--no-async-scheduling",
     ]
-    with RemoteOpenAIServer(
-        MODEL_NAME, args, env_dict={"VLLM_USE_V2_MODEL_RUNNER": "0"}
-    ) as remote_server:
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 
 

@@ -75,11 +75,10 @@ def test_backend_guidance_rollback_terminated():
     assert grammar.is_terminated()
 
 
-def test_grammar_bitmask_with_specdec(monkeypatch: pytest.MonkeyPatch):
+def test_grammar_bitmask_with_specdec():
     tokenizer = AutoTokenizer.from_pretrained(TOKENIZER)
     prompt = tokenizer.encode('{"a": "b"}')
     speculative_config = SpeculativeConfig(model="[ngram]", num_speculative_tokens=3)
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
     vllm_config = VllmConfig(
         model_config=ModelConfig(tokenizer=TOKENIZER),
         structured_outputs_config=StructuredOutputsConfig(backend="guidance"),

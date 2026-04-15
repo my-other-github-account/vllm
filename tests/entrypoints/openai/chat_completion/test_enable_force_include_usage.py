@@ -29,7 +29,6 @@ def chat_server_with_force_include_usage(request):
         "Qwen/Qwen3-0.6B",
         args,
         auto_port=False,
-        env_dict={"VLLM_USE_V2_MODEL_RUNNER": "0"},
     ) as remote_server:
         yield remote_server
 

@@ -471,6 +471,16 @@ class VllmConfig:
         if use_v2_model_runner is not None:
             return use_v2_model_runner
 
+        # ngram / ngram_gpu are not supported by the v2 model runner yet
+        if self.speculative_config is not None and (
+            self.speculative_config.method in ("ngram", "ngram_gpu")
+        ):
+            logger.warning_once(
+                "Model runner v2 does not support ngram or ngram_gpu speculative "
+                "decoding; using the v1 model runner instead."
+            )
+            return False
+
         return (
             self.model_config is not None
             and self.model_config.model in DEFAULT_V2_MODEL_RUNNER_WHITELIST
