@@ -228,6 +228,12 @@ def select_nvfp4_moe_backend(
         elif envs.is_set("VLLM_FLASHINFER_MOE_BACKEND"):
             # If user is explicit about backend, validate it.
             backend = fi_2_vllm_backend_map[get_flashinfer_moe_backend()]
+            # For batched activation format, use batched variant if available.
+            if (
+                activation_format == mk.FusedMoEActivationFormat.BatchedExperts
+                and backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL
+            ):
+                backend = NvFp4MoeBackend.FLASHINFER_CUTEDSL_BATCHED
             return _return_or_raise(
                 backend, config, weight_key, activation_key, activation_format
             )
