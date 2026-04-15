@@ -280,11 +280,16 @@ class Worker(WorkerBase):
 
             # take current memory snapshot
             self.init_snapshot = init_snapshot = MemorySnapshot(device=self.device)
-            self.requested_memory = request_memory(init_snapshot, self.cache_config)
+            # Skip gpu_memory_utilization validation when kv_cache_memory_bytes
+            # is explicitly set — the user controls the KV cache size directly
+            # and gpu_memory_utilization should be ignored per CacheConfig docs.
+            if self.cache_config.kv_cache_memory_bytes is None:
+                self.requested_memory = request_memory(init_snapshot, self.cache_config)
+                logger.debug(
+                    "worker requested memory: %sGiB",
+                    format_gib(self.requested_memory),
+                )
             logger.debug("worker init memory snapshot: %r", self.init_snapshot)
-            logger.debug(
-                "worker requested memory: %sGiB", format_gib(self.requested_memory)
-            )
         else:
             raise RuntimeError(f"Not support device type: {self.device_config.device}")
 
