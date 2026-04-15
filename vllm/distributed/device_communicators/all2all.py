@@ -11,6 +11,7 @@ from vllm.distributed import get_dp_group, get_ep_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
 from vllm.utils.flashinfer import (
     has_flashinfer_nvlink_one_sided,
     has_flashinfer_nvlink_two_sided,
@@ -99,6 +100,35 @@ def _get_or_create_moe_rs(group_name: str):
         return None
 
 
+@triton.jit
+def _mask_topk_ids_kernel(
+    topk_ids_ptr,
+    topk_ids_stride,
+    topk,
+    num_actual_tokens_ptr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    token_idx = tl.program_id(0)
+    num_actual_tokens = tl.load(num_actual_tokens_ptr)
+    if token_idx < num_actual_tokens:
+        return
+
+    block = tl.arange(0, BLOCK_SIZE)
+    mask = block < topk
+    tl.store(topk_ids_ptr + token_idx * topk_ids_stride + block, -1, mask=mask)
+
+
+def mask_topk_ids(topk_ids: torch.Tensor, num_actual_tokens: torch.Tensor) -> None:
+    num_tokens, topk = topk_ids.shape
+    _mask_topk_ids_kernel[(num_tokens,)](
+        topk_ids,
+        topk_ids.stride(0),
+        topk,
+        num_actual_tokens,
+        BLOCK_SIZE=triton.next_power_of_2(topk),
+    )
+
+
 def moe_dispatch(
     tensors: list[torch.Tensor],
     group_name: str,
@@ -118,6 +148,12 @@ def moe_dispatch(
     # Try custom kernel for small, uniform-sized batches.
     n = len(tensors)
     if 2 <= n <= 4:
+        forward_context = get_forward_context()
+        num_actual_tokens = getattr(forward_context, "num_actual_tokens", None)
+        if num_actual_tokens is not None:
+            topk_ids = tensors[2]
+            mask_topk_ids(topk_ids, num_actual_tokens)
+
         moe_ag = _get_or_create_moe_ag(group_name)
         if moe_ag is not None:
             ws = moe_ag.world_size

@@ -310,6 +310,7 @@ def override_forward_context(forward_context: ForwardContext | None):
 def set_forward_context(
     attn_metadata: Any,
     vllm_config: VllmConfig,
+    num_actual_tokens: torch.Tensor | None = None,
     num_tokens: int | None = None,
     num_tokens_across_dp: torch.Tensor | None = None,
     cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
@@ -377,6 +378,8 @@ def set_forward_context(
         additional_kwargs,
         skip_compiled,
     )
+    if num_actual_tokens is not None:
+        forward_context.num_actual_tokens = num_actual_tokens
 
     try:
         with (

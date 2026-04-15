@@ -971,6 +971,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             empty_output = self.kv_connector.no_forward(scheduler_output)
             return empty_output
 
+        self.input_buffers.num_actual_tokens[:1] = num_toks if not dummy_run else 0
         if not dummy_run:
             # Common case.
             # Prepare all the inputs and copy to the input buffers.
@@ -1075,6 +1076,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             with set_forward_context(
                 attn_metadata,
                 self.vllm_config,
+                num_actual_tokens=self.input_buffers.num_actual_tokens,
                 num_tokens=input_batch.num_tokens_after_padding,
                 cudagraph_runtime_mode=batch_desc.cg_mode,
                 num_tokens_across_dp=num_tokens_across_dp,

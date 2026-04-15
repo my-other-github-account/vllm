@@ -335,6 +335,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                 with set_forward_context(
                     attn_metadata if cg_mode != CUDAGraphMode.PIECEWISE else None,
                     self.vllm_config,
+                    num_actual_tokens=input_buffers.num_actual_tokens,
                     num_tokens=num_tokens,
                     cudagraph_runtime_mode=cg_mode,
                     num_tokens_across_dp=num_tokens_across_dp,
