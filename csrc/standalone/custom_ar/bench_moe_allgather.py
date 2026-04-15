@@ -127,10 +127,7 @@ def main():
 
     if rank == 0:
         print(f"world_size={ws}, max_per_rank={ag.max_per_rank} bytes")
-        print(
-            f"{'config':<12} {'lamport':>10} {'lamp_graph':>10} "
-            f"{'nccl_1ag':>10} {'nccl_graph':>10} {'speedup':>8}"
-        )
+        print(f"{'config':<12} {'lamport_graph':>10} {'nccl_graph':>10} {'speedup':>8}")
         print("-" * 65)
 
     for name, N in configs:
@@ -167,8 +164,6 @@ def main():
                 c_outs,
             )
 
-        lam_us = gpu_timer(run_lamport)
-
         # Lamport with CUDA graph.
         try:
             lam_g_us = gpu_timer_graph(run_lamport)
@@ -187,8 +182,6 @@ def main():
         def run_nccl():
             dist.all_gather_into_tensor(cat_out, cat_inp)
 
-        nccl_us = gpu_timer(run_nccl)
-
         # NCCL with CUDA graph.
         try:
             nccl_g_us = gpu_timer_graph(run_nccl)
@@ -197,10 +190,7 @@ def main():
 
         if rank == 0:
             speedup = nccl_g_us / lam_g_us if lam_g_us > 0 else float("nan")
-            print(
-                f"{name:<12} {lam_us:>9.1f}µ {lam_g_us:>9.1f}µ "
-                f"{nccl_us:>9.1f}µ {nccl_g_us:>9.1f}µ {speedup:>7.2f}x"
-            )
+            print(f"{name:<12} {lam_g_us:>9.1f}µ {nccl_g_us:>9.1f}µ {speedup:>7.2f}x")
 
     dist.barrier()
     dist.destroy_process_group()
