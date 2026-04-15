@@ -98,9 +98,14 @@ steps:
     commands:
       - "bash .buildkite/scripts/generate-and-upload-nightly-index.sh"
 
+  - block: "Unblock to build release Docker images"
+    key: block-build-release-images
+    if: build.env("NIGHTLY") != "1"
+
   - group: "Build release Docker images"
     key: "build-release-images"
-    if: build.env("NIGHTLY") == "1"
+    depends_on: block-build-release-images
+    allow_dependency_failure: true
     steps:
       - label: "Build release image - x86_64 - CUDA 12.9"
         depends_on: ~
@@ -231,7 +236,6 @@ steps:
 
   - group: "Publish release images"
     key: "publish-release-images"
-    if: build.env("NIGHTLY") == "1"
     steps:
       - label: "Create multi-arch manifest - CUDA 12.9"
         depends_on:
@@ -618,8 +622,9 @@ steps:
   # ROCm Job 6: Build ROCm Release Docker Image
   - label: ":docker: Build release image - x86_64 - ROCm"
     id: build-rocm-release-image
-    if: build.env("NIGHTLY") == "1"
     depends_on:
+      - step: block-build-release-images
+        allow_failure: true
       - step: build-rocm-base-wheels
         allow_failure: false
     agents:
