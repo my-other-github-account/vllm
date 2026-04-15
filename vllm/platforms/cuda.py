@@ -912,6 +912,22 @@ _mig_device = _is_mig_device()
 
 if _mig_device:
     CudaPlatform = NonNvmlCudaPlatform
+
+    # Disable expandable_segments on MIG devices. PyTorch's
+    # CUDACachingAllocator internally calls NVML (for the
+    # expandable_segments feature) which fails on MIG with
+    # "NVML_SUCCESS == r INTERNAL ASSERT FAILED", crashing before
+    # a real torch.cuda.OutOfMemoryError can surface.
+    _alloc_conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
+    if "expandable_segments" not in _alloc_conf:
+        new_val = (f"{_alloc_conf},expandable_segments:False"
+                   if _alloc_conf else "expandable_segments:False")
+        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = new_val
+        logger.info(
+            "MIG device detected: set PYTORCH_CUDA_ALLOC_CONF=%s "
+            "to prevent NVML assert in CUDACachingAllocator.",
+            new_val,
+        )
 else:
     CudaPlatform = NvmlCudaPlatform if nvml_available else NonNvmlCudaPlatform
 
