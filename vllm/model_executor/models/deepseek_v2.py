@@ -689,19 +689,31 @@ class Indexer(nn.Module):
         )
 
     def forward(
-        self, hidden_states: torch.Tensor, qr: torch.Tensor, positions, rotary_emb
+        self,
+        hidden_states: torch.Tensor,
+        qr: torch.Tensor,
+        positions,
+        rotary_emb,
+        precomputed_k: torch.Tensor | None = None,
+        precomputed_weights: torch.Tensor | None = None,
     ) -> torch.Tensor:
         q, _ = self.wq_b(qr)
         q = q.view(-1, self.n_head, self.head_dim)
         q_pe, q_nope = torch.split(
             q, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1
         )
-        # Fused wk + weights_proj: one GEMM, then split
-        kw, _ = self.wk_weights_proj(hidden_states)
-        k = kw[:, : self.head_dim]
-        weights = kw[:, self.head_dim :]
 
-        k = self.k_norm(k)
+        # Use pre-computed k and weights from mla_wk_fork/join when available.
+        # wk_weights_proj+k_norm were already computed on alt_stream.
+        if precomputed_k is not None:
+            k = precomputed_k
+            weights = precomputed_weights
+        else:
+            # Fused wk + weights_proj: one GEMM, then split
+            kw, _ = self.wk_weights_proj(hidden_states)
+            k = kw[:, : self.head_dim]
+            weights = kw[:, self.head_dim :]
+            k = self.k_norm(k)
         k_pe, k_nope = torch.split(
             k, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1
         )
@@ -888,6 +900,7 @@ class DeepseekV2MLAAttention(nn.Module):
         prefix: str = "",
         topk_indices_buffer: torch.Tensor | None = None,
         input_size: int | None = None,
+        alt_stream: torch.cuda.Stream | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -1024,6 +1037,7 @@ class DeepseekV2MLAAttention(nn.Module):
             indexer_rotary_emb=self.indexer_rope_emb,
             is_sparse=self.is_v32,
             topk_indices_buffer=topk_indices_buffer,
+            alt_stream=alt_stream,
         )
 
         self.mla_attn = MultiHeadLatentAttentionWrapper(
@@ -1057,6 +1071,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         prefix: str,
         config: DeepseekV2Config | None = None,
         topk_indices_buffer: torch.Tensor | None = None,
+        alt_stream: torch.cuda.Stream | None = None,
     ) -> None:
         super().__init__()
 
@@ -1107,6 +1122,7 @@ class DeepseekV2DecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
             topk_indices_buffer=topk_indices_buffer,
+            **({"alt_stream": alt_stream} if alt_stream is not None else {}),
         )
 
         if (
@@ -1209,6 +1225,17 @@ class DeepseekV2Model(nn.Module):
         else:
             topk_indices_buffer = None
 
+        # Create alt_stream for multi-stream indexer parallelism.
+        # Single stream shared across ALL layers. Matches SGLang design.
+        if (
+            self.is_v32
+            and current_platform.is_cuda_alike()
+            and vllm_config.model_config.use_mla
+        ):
+            self.alt_stream = torch.cuda.Stream()
+        else:
+            self.alt_stream = None
+
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
                 config.vocab_size,
@@ -1224,6 +1251,7 @@ class DeepseekV2Model(nn.Module):
                 vllm_config,
                 prefix,
                 topk_indices_buffer=topk_indices_buffer,
+                alt_stream=self.alt_stream,
             ),
             prefix=f"{prefix}.layers",
         )
