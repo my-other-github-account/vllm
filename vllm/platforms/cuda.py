@@ -893,11 +893,13 @@ def _is_mig_device() -> bool:
                 handle = pynvml.nvmlDeviceGetHandleByIndex(0)
                 pynvml.nvmlDeviceGetMemoryInfo(handle)
             except pynvml.NVMLError as e:
-                if "NoPermission" in str(type(e).__name__) or \
-                   "Insufficient Permissions" in str(e):
+                if "NoPermission" in str(
+                    type(e).__name__
+                ) or "Insufficient Permissions" in str(e):
                     logger.info(
                         "Detected MIG device via NVML permission error: %s, "
-                        "using NonNvmlCudaPlatform.", e,
+                        "using NonNvmlCudaPlatform.",
+                        e,
                     )
                     return True
             finally:
@@ -910,6 +912,7 @@ def _is_mig_device() -> bool:
 
 _mig_device = _is_mig_device()
 
+CudaPlatform: type[NvmlCudaPlatform] | type[NonNvmlCudaPlatform]
 if _mig_device:
     CudaPlatform = NonNvmlCudaPlatform
 
@@ -920,8 +923,11 @@ if _mig_device:
     # a real torch.cuda.OutOfMemoryError can surface.
     _alloc_conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
     if "expandable_segments" not in _alloc_conf:
-        new_val = (f"{_alloc_conf},expandable_segments:False"
-                   if _alloc_conf else "expandable_segments:False")
+        new_val = (
+            f"{_alloc_conf},expandable_segments:False"
+            if _alloc_conf
+            else "expandable_segments:False"
+        )
         os.environ["PYTORCH_CUDA_ALLOC_CONF"] = new_val
         logger.info(
             "MIG device detected: set PYTORCH_CUDA_ALLOC_CONF=%s "
