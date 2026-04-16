@@ -844,6 +844,37 @@ class NonNvmlCudaPlatform(CudaPlatformBase):
         return None
 
 
+class MigCudaPlatform(NvmlCudaPlatform):
+    """Platform for MIG (Multi-Instance GPU) devices.
+
+    Inherits from NvmlCudaPlatform so that device queries like
+    get_device_capability() and get_device_name() use NVML instead of
+    torch.cuda, avoiding premature CUDA context initialization (which
+    would break fork-based test frameworks).
+
+    Overrides only the methods that fail on MIG partitions due to NVML
+    NoPermission errors (memory queries report full-GPU memory instead
+    of partition memory).
+    """
+
+    @classmethod
+    def get_device_total_memory(cls, device_id: int = 0) -> int:
+        # NVML returns the *full* GPU's memory on MIG partitions, not the
+        # partition's memory. Use torch.cuda which reports correctly.
+        device_props = torch.cuda.get_device_properties(device_id)
+        return device_props.total_memory
+
+    @classmethod
+    def is_fully_connected(cls, physical_device_ids: list[int]) -> bool:
+        # P2P / NVLink queries are not meaningful on MIG partitions.
+        return False
+
+    @classmethod
+    def log_warnings(cls):
+        # Skip NVML-based heterogeneous-GPU warnings on MIG partitions.
+        pass
+
+
 # Autodetect either NVML-enabled or non-NVML platform
 # based on whether NVML is available.
 nvml_available = False
@@ -879,7 +910,7 @@ def _is_mig_device() -> bool:
     ):
         logger.info(
             "Detected MIG device from CUDA_VISIBLE_DEVICES=%s, "
-            "using NonNvmlCudaPlatform to avoid NVML permission errors.",
+            "using MigCudaPlatform to avoid NVML memory errors.",
             cuda_visible,
         )
         return True
@@ -898,7 +929,7 @@ def _is_mig_device() -> bool:
                 ) or "Insufficient Permissions" in str(e):
                     logger.info(
                         "Detected MIG device via NVML permission error: %s, "
-                        "using NonNvmlCudaPlatform.",
+                        "using MigCudaPlatform.",
                         e,
                     )
                     return True
@@ -912,9 +943,9 @@ def _is_mig_device() -> bool:
 
 _mig_device = _is_mig_device()
 
-CudaPlatform: type[NvmlCudaPlatform] | type[NonNvmlCudaPlatform]
+CudaPlatform: type[NvmlCudaPlatform] | type[NonNvmlCudaPlatform] | type[MigCudaPlatform]
 if _mig_device:
-    CudaPlatform = NonNvmlCudaPlatform
+    CudaPlatform = MigCudaPlatform
 
     # Disable expandable_segments on MIG devices. PyTorch's
     # CUDACachingAllocator internally calls NVML (for the
