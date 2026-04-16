@@ -965,9 +965,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_reqs, num_toks_unpadded, max_query_len
         )
 
-        batch_desc = self.cudagraph_manager.dispatch(
-            num_reqs, num_toks, uniform_tok_count
-        )
+        assert self.cudagraph_manager is not None
+        cudagraph_manager = self.cudagraph_manager
+        batch_desc = cudagraph_manager.dispatch(num_reqs, num_toks, uniform_tok_count)
 
         if self.compilation_config.pass_config.enable_sp:
             tp_size = self.parallel_config.tensor_parallel_size
@@ -985,7 +985,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
                 # disable decode-specialized FULL dispatch under SP.
                 uniform_tok_count = None
-                batch_desc = self.cudagraph_manager.dispatch(
+                batch_desc = cudagraph_manager.dispatch(
                     num_reqs, num_toks, uniform_tok_count
                 )
                 if batch_desc.cg_mode == CUDAGraphMode.FULL:
@@ -1011,7 +1011,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             skip_compiled = True
 
         batch_desc, num_tokens_across_dp = dispatch_cg_and_sync_dp(
-            self.cudagraph_manager,
+            cudagraph_manager,
             num_reqs,
             num_toks,
             uniform_tok_count,
