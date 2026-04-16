@@ -1160,13 +1160,20 @@ def test_spec_decode_logprobs(
         assert ref_logprob.decoded_token == spec_logprob.decoded_token
 
 
-def test_prompt_logprobs_with_chunking_and_preemption():
+def test_prompt_logprobs_with_chunking_and_preemption(monkeypatch, request):
     """Test that prompt logprobs are correctly returned when using
     both chunked prefill and preemption.
 
     This test ensures that the num_prompt_logprobs tracking persists
     across preemptions and prefill chunks.
     """
+    import vllm.envs as envs
+
+    # TODO: Remove this fallback once ModelRunnerV2 supports prompt logprobs
+    # under chunked prefill + preemption (tracked in PR #39937).
+    envs.disable_envs_cache()
+    request.addfinalizer(envs.disable_envs_cache)
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
 
     # Create prompts that will trigger chunking and preemption
     prompts = [
