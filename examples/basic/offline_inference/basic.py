@@ -16,7 +16,7 @@ sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
 def main():
     # Create an LLM.
-    llm = LLM(model="facebook/opt-125m")
+    llm = LLM(model="nvidia/DeepSeek-V3.2-NVFP4", enforce_eager=True, tensor_parallel_size=4, kernel_config={"enable_flashinfer_autotune": False})
     # Generate texts from the prompts.
     # The output is a list of RequestOutput objects
     # that contain the prompt, generated text, and other information.
