@@ -576,8 +576,10 @@ class GroupCoordinator:
                 f"by world size {self.world_size}, got {input_.numel()}."
             )
 
-        assert input_.is_contiguous(), "input_ must be contiguous"
-        assert output_.is_contiguous(), "output_ must be contiguous"
+        if not input_.is_contiguous():
+            raise ValueError("all_to_all requires input_ to be contiguous.")
+        if not output_.is_contiguous():
+            raise ValueError("all_to_all requires output_ to be contiguous.")
 
         if self.device_communicator is not None:
             self.device_communicator.all_to_all(output_, input_)
