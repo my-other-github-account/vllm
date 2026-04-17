@@ -101,9 +101,8 @@ def gumbel_block_argmax(
         pos = tl.load(pos_ptr + token_idx)
         gumbel_seed = tl.randint(seed, pos)
 
-        # tl.rand returns fp32, so build a true fp64 uniform from 64 random
-        # bits before applying the double-log transform.
-        u = tl_rand64(gumbel_seed, block, includes_zero=False)
+        # Use FP32 for performance.
+        u = tl.rand(gumbel_seed, block)
         gumbel_noise = -tl.log(-tl.log(u))
 
         # Apply gumbel noise.
