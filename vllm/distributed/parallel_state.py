@@ -549,6 +549,47 @@ class GroupCoordinator:
             raise ValueError("No device communicator found")
         return self.device_communicator.all_gatherv(input_, dim, sizes)
 
+    def all_to_all(self, output_: torch.Tensor, input_: torch.Tensor) -> torch.Tensor:
+        """Run an all-to-all exchange into a preallocated output buffer."""
+        if self.world_size == 1:
+            output_.copy_(input_)
+            return output_
+
+        if input_.shape != output_.shape:
+            raise ValueError(
+                "all_to_all requires matching input/output shapes, got "
+                f"{tuple(input_.shape)} and {tuple(output_.shape)}."
+            )
+        if input_.dtype != output_.dtype:
+            raise ValueError(
+                "all_to_all requires matching input/output dtypes, got "
+                f"{input_.dtype} and {output_.dtype}."
+            )
+        if input_.device != output_.device:
+            raise ValueError(
+                "all_to_all requires matching input/output devices, got "
+                f"{input_.device} and {output_.device}."
+            )
+        if input_.numel() % self.world_size != 0:
+            raise ValueError(
+                "all_to_all requires the flattened tensor size to be divisible "
+                f"by world size {self.world_size}, got {input_.numel()}."
+            )
+
+        assert input_.is_contiguous(), "input_ must be contiguous"
+        assert output_.is_contiguous(), "output_ must be contiguous"
+
+        if self.device_communicator is not None:
+            self.device_communicator.all_to_all(output_, input_)
+        else:
+            torch.distributed.all_to_all_single(
+                output_.view(-1),
+                input_.view(-1),
+                group=self.device_group,
+            )
+
+        return output_
+
     def reduce_scatter(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
         world_size = self.world_size
         # Bypass the function if we are using only 1 GPU.

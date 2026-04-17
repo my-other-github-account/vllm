@@ -25,7 +25,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import torch
-import torch.distributed as dist
 
 from vllm.triton_utils import tl, triton
 
@@ -338,21 +337,9 @@ def dcp_a2a_lse_reduce(
     send_lse = local_lse.view(B, world_size, H_per_rank).permute(1, 0, 2).contiguous()
     recv_lse = torch.empty_like(send_lse)
 
-    # All-to-All for partial attention outputs and LSE values (async overlap)
-    work_output = dist.all_to_all_single(
-        recv_output.view(-1),
-        send_output.view(-1),
-        group=cp_group.device_group,
-        async_op=True,
-    )
-    work_lse = dist.all_to_all_single(
-        recv_lse.view(-1),
-        send_lse.view(-1),
-        group=cp_group.device_group,
-        async_op=True,
-    )
-    work_output.wait()
-    work_lse.wait()
+    # all to all through the group communicator
+    cp_group.all_to_all(recv_output, send_output)
+    cp_group.all_to_all(recv_lse, send_lse)
 
     # LSE-weighted combination via Triton kernel (local, no communication)
     return dcp_lse_combine_triton(
