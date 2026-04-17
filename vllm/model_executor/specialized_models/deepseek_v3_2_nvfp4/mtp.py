@@ -28,6 +28,7 @@ from vllm.model_executor.models.utils import maybe_prefix
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
+from .kernels import fused_mtp_entry
 from .layer import DeepseekV32DecoderLayer
 from .model import remap_weight_name
 
@@ -69,6 +70,46 @@ class DeepSeekMultiTokenPredictorLayer(DeepSeekMultiTokenPredictorLayerBase):
             topk_indices_buffer=topk_indices_buffer,
             prefix=prefix,
         )
+        # Pre-allocated 0-dim eps tensors so fused_mtp_entry can stay
+        # tensor-only (avoids Python-float scalars leaking into the
+        # torch.compile input list).
+        self._e_eps_gpu = torch.full(
+            (),
+            self.enorm.variance_epsilon,
+            dtype=torch.float32,
+            device=current_platform.device_type,
+        )
+        self._h_eps_gpu = torch.full(
+            (),
+            self.hnorm.variance_epsilon,
+            dtype=torch.float32,
+            device=current_platform.device_type,
+        )
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        previous_hidden_states: torch.Tensor,
+        inputs_embeds: torch.Tensor | None = None,
+        spec_step_index: int = 0,
+    ) -> torch.Tensor:
+        assert inputs_embeds is not None
+        eh_concat = fused_mtp_entry(
+            inputs_embeds,
+            previous_hidden_states,
+            positions,
+            self.enorm.weight,
+            self.hnorm.weight,
+            self._e_eps_gpu,
+            self._h_eps_gpu,
+        )
+        hidden_states = self.eh_proj(eh_concat)
+        hidden_states, residual = self.mtp_block(
+            positions=positions, hidden_states=hidden_states, residual=None
+        )
+        hidden_states = residual + hidden_states
+        return hidden_states
 
 
 class DeepSeekMultiTokenPredictor(DeepSeekMultiTokenPredictorBase):

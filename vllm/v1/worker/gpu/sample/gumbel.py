@@ -74,6 +74,7 @@ def gumbel_block_argmax(
     temp_ptr,
     seeds_ptr,
     pos_ptr,
+    pos_offset,
     processed_logits_ptr,
     processed_logits_stride,
     APPLY_TEMPERATURE: tl.constexpr,
@@ -98,7 +99,7 @@ def gumbel_block_argmax(
     if temp != 0.0:
         # Calculate the seed for gumbel noise.
         seed = tl.load(seeds_ptr + req_state_idx)
-        pos = tl.load(pos_ptr + token_idx)
+        pos = tl.load(pos_ptr + token_idx) + pos_offset
         gumbel_seed = tl.randint(seed, pos)
 
         # Use FP32 for performance.
@@ -125,6 +126,7 @@ def _gumbel_sample_kernel(
     expanded_idx_mapping_ptr,
     seeds_ptr,
     pos_ptr,
+    pos_offset,
     temp_ptr,
     vocab_size,
     BLOCK_SIZE: tl.constexpr,
@@ -150,6 +152,7 @@ def _gumbel_sample_kernel(
         temp_ptr,
         seeds_ptr,
         pos_ptr,
+        pos_offset,
         processed_logits_ptr,
         processed_logits_stride,
         APPLY_TEMPERATURE=APPLY_TEMPERATURE,
@@ -157,6 +160,33 @@ def _gumbel_sample_kernel(
     token_id = block_idx * BLOCK_SIZE + idx
     tl.store(local_argmax_ptr + token_idx * local_argmax_stride + block_idx, token_id)
     tl.store(local_max_ptr + token_idx * local_max_stride + block_idx, value)
+
+
+@triton.jit
+def _gumbel_reduce_kernel(
+    local_argmax_ptr,
+    local_argmax_stride,
+    local_max_ptr,
+    local_max_stride,
+    sampled_ptr,
+    sampled_stride,
+    num_blocks,
+    NUM_BLOCKS_NEXT_POW2: tl.constexpr,
+):
+    token_idx = tl.program_id(0)
+    offs = tl.arange(0, NUM_BLOCKS_NEXT_POW2)
+    mask = offs < num_blocks
+
+    values = tl.load(
+        local_max_ptr + token_idx * local_max_stride + offs,
+        mask=mask,
+        other=float("-inf"),
+    )
+    _, block_idx = tl.max(values, axis=0, return_indices=True)
+    token_id = tl.load(
+        local_argmax_ptr + token_idx * local_argmax_stride + block_idx,
+    )
+    tl.store(sampled_ptr + token_idx * sampled_stride, token_id)
 
 
 def gumbel_sample(
@@ -167,6 +197,8 @@ def gumbel_sample(
     pos: torch.Tensor,  # [num_tokens]
     apply_temperature: bool,
     processed_logits_out: torch.Tensor | None = None,  # [num_reqs, vocab_size]
+    out: torch.Tensor | None = None,  # [num_tokens], int64
+    pos_offset: int = 0,
 ) -> torch.Tensor:
     num_tokens, vocab_size = logits.shape
     BLOCK_SIZE = 1024
@@ -185,12 +217,24 @@ def gumbel_sample(
         expanded_idx_mapping,
         seed,
         pos,
+        pos_offset,
         temperature,
         vocab_size,
         BLOCK_SIZE=BLOCK_SIZE,
         APPLY_TEMPERATURE=apply_temperature,
     )
     # NOTE(woosuk): Use int64 for later indexing.
-    max_block_idx = local_max.argmax(dim=-1, keepdim=True)
-    sampled = local_argmax.gather(dim=-1, index=max_block_idx).view(-1)
-    return sampled
+    if out is None:
+        out = torch.empty(num_tokens, dtype=torch.int64, device=logits.device)
+    _gumbel_reduce_kernel[(num_tokens,)](
+        local_argmax,
+        local_argmax.stride(0),
+        local_max,
+        local_max.stride(0),
+        out,
+        out.stride(0),
+        num_blocks,
+        NUM_BLOCKS_NEXT_POW2=triton.next_power_of_2(num_blocks),
+        num_warps=1,
+    )
+    return out

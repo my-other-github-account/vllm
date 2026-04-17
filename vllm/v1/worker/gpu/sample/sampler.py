@@ -39,6 +39,12 @@ class Sampler:
         self.logit_bias_state = LogitBiasState(max_num_reqs, device)
         self.bad_words_state = BadWordsState(req_states)
         self.num_speculative_tokens = num_speculative_tokens
+        # Pre-allocated ones tensor for SamplerOutput.num_sampled (1 per req
+        # in the non-rejection path). Slicing returns a view so downstream
+        # reads see a stable tensor without a kernel launch per call.
+        self._num_sampled_ones = torch.ones(
+            max_num_reqs, dtype=torch.int32, device=device
+        )
 
     def add_request(
         self, req_idx: int, prompt_len: int, sampling_params: SamplingParams
@@ -62,21 +68,36 @@ class Sampler:
         expanded_idx_mapping = input_batch.expanded_idx_mapping
         idx_mapping_np = input_batch.idx_mapping_np
         cu_num_logits_np = input_batch.cu_num_logits_np
-        expanded_local_pos = input_batch.expanded_local_pos
         pos = input_batch.positions[input_batch.logits_indices]
-        input_ids = input_batch.input_ids[input_batch.logits_indices]
 
         # NOTE(woosuk): We intentionally compute num_nans before sampling to make clear
         # that num_nans is computed before applying penalties and temperature.
         num_nans = get_num_nans(logits) if self.compute_nans else None
-        sampled, processed_logits = self.sample(
-            logits,
-            expanded_idx_mapping,
-            idx_mapping_np,
-            pos,
-            input_ids,
-            expanded_local_pos,
-        )
+
+        if self._is_sampling_params_noop(idx_mapping_np):
+            # Fast path: no per-request op modifies logits. Skip the fp32 copy,
+            # the input_ids gather (only needed by bias/penalties/bad_words),
+            # and all per-state kernel dispatches.
+            sampled = gumbel_sample(
+                logits,
+                expanded_idx_mapping,
+                self.sampling_states.temperature.gpu,
+                self.sampling_states.seeds.gpu,
+                pos,
+                apply_temperature=True,
+            )
+            processed_logits = logits
+        else:
+            input_ids = input_batch.input_ids[input_batch.logits_indices]
+            expanded_local_pos = input_batch.expanded_local_pos
+            sampled, processed_logits = self.sample(
+                logits,
+                expanded_idx_mapping,
+                idx_mapping_np,
+                pos,
+                input_ids,
+                expanded_local_pos,
+            )
 
         max_num_logprobs = self.sampling_states.max_num_logprobs(idx_mapping_np)
         if max_num_logprobs != NO_LOGPROBS:
@@ -98,7 +119,7 @@ class Sampler:
             sampled_token_ids=sampled.view(-1, 1),
             logprobs_tensors=logprobs_tensors,
             num_nans=num_nans,
-            num_sampled=input_batch.seq_lens.new_ones(input_batch.num_reqs),
+            num_sampled=self._num_sampled_ones[: input_batch.num_reqs],
         )
         return sampler_output
 
@@ -150,6 +171,31 @@ class Sampler:
         return self.sampling_states.apply_top_k_top_p(
             logits, expanded_idx_mapping, idx_mapping_np
         )
+
+    def _is_sampling_params_noop(self, idx_mapping_np: np.ndarray) -> bool:
+        """True iff every active request uses pure defaults (argmax / gumbel).
+
+        In that case we can bypass the bf16->fp32 copy and all the per-state
+        kernel dispatches and feed the raw logits directly into
+        gumbel_sample with APPLY_TEMPERATURE=True, which handles both
+        temperature=0 (argmax) and temperature=1 (gumbel noise) without
+        any prior in-place mutation.
+        """
+        states = self.sampling_states
+        temp_np = states.temperature.np[idx_mapping_np]
+        if not np.all((temp_np == 0.0) | (temp_np == 1.0)):
+            return False
+        if np.any(states.min_p.np[idx_mapping_np] != 0.0):
+            return False
+        if np.any(states.top_k.np[idx_mapping_np] != states.vocab_size):
+            return False
+        if np.any(states.top_p.np[idx_mapping_np] != 1.0):
+            return False
+        if np.any(self.penalties_state.use_penalty[idx_mapping_np]):
+            return False
+        if np.any(self.logit_bias_state.use_logit_bias[idx_mapping_np]):
+            return False
+        return np.all(self.bad_words_state.num_bad_words.np[idx_mapping_np] == 0)
 
     def sample(
         self,

@@ -237,23 +237,35 @@ class EagleSpeculator:
             cudagraph_runtime_mode=cudagraph_runtime_mode,
             mm_inputs=mm_inputs,
         )
-        sample_hidden_states = last_hidden_states[last_token_indices]
+        # For MTP, run_model returns the same tensor for both; the two
+        # `[last_token_indices]` gathers below would be redundant, so
+        # write once into self.hidden_states and feed compute_logits from
+        # that view. For eagle3 the two tensors differ, so we still need
+        # both gathers.
+        if last_hidden_states is hidden_states:
+            self.hidden_states[:num_reqs] = hidden_states[last_token_indices]
+            sample_hidden_states = self.hidden_states[:num_reqs]
+        else:
+            sample_hidden_states = last_hidden_states[last_token_indices]
+            self.hidden_states[:num_reqs] = hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states)
 
         # NOTE(woosuk): We must add 1 to the positions to match the Gumbel noise
-        # used for draft and target sampling.
-        self.draft_tokens[:num_reqs, 0] = gumbel_sample(
+        # used for draft and target sampling. pos_offset=1 folds the +1 into
+        # the kernel itself instead of launching a separate add kernel.
+        gumbel_sample(
             logits,
             idx_mapping,
             self.temperature,
             self.seeds,
-            pos + 1,
+            pos,
             apply_temperature=True,
             processed_logits_out=self.draft_logits[:, 0]
             if self.draft_logits is not None
             else None,
+            out=self.draft_tokens[:num_reqs, 0],
+            pos_offset=1,
         )
-        self.hidden_states[:num_reqs] = hidden_states[last_token_indices]
         self.input_buffers.positions[:num_reqs] = pos
 
     def generate_draft(
@@ -282,19 +294,24 @@ class EagleSpeculator:
             logits = self.model.compute_logits(last_hidden_states)
 
             # NOTE(woosuk): We must add 1 to the positions to match the Gumbel noise
-            # used for draft and target sampling.
+            # used for draft and target sampling. pos_offset=1 folds the +1
+            # into the kernel instead of launching a separate add.
+            # Write the sampled token directly into the step-th column of
+            # draft_tokens (strided view). update_eagle_inputs below will
+            # re-read it from the same slice with a matching stride.
             draft_tokens = gumbel_sample(
                 logits,
                 idx_mapping,
                 self.temperature,
                 self.seeds,
-                pos + 1,
+                pos,
                 apply_temperature=True,
                 processed_logits_out=self.draft_logits[:, step]
                 if self.draft_logits is not None
                 else None,
+                out=self.draft_tokens[:num_reqs, step],
+                pos_offset=1,
             )
-            self.draft_tokens[:num_reqs, step] = draft_tokens
 
             if step < self.num_speculative_steps - 1:
                 # Update the inputs for the next step.
@@ -760,6 +777,7 @@ def _update_eagle_inputs_kernel(
     seq_lens_ptr,
     max_model_len,
     draft_tokens_ptr,
+    draft_tokens_stride,
     output_hidden_states_ptr,
     output_hidden_states_stride,
     hidden_size,
@@ -768,7 +786,7 @@ def _update_eagle_inputs_kernel(
     req_idx = tl.program_id(0)
 
     # Draft token -> Input ID.
-    draft_token = tl.load(draft_tokens_ptr + req_idx)
+    draft_token = tl.load(draft_tokens_ptr + req_idx * draft_tokens_stride)
     tl.store(input_ids_ptr + req_idx, draft_token)
 
     # Output hidden states -> Input hidden states.
@@ -813,6 +831,7 @@ def update_eagle_inputs(
         input_buffers.seq_lens,
         max_model_len,
         draft_tokens,
+        draft_tokens.stride(0),
         output_hidden_states,
         output_hidden_states.stride(0),
         hidden_size,

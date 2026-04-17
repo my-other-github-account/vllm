@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import direct_register_custom_op
 
 
 @triton.jit
@@ -12,6 +14,220 @@ def _rms_norm(x, w, eps, HIDDEN_SIZE: tl.constexpr):
     rrms = tl.rsqrt(mean_sq + eps)
     w = w.to(tl.float32)
     return (x * rrms) * w
+
+
+@triton.jit
+def _fused_mtp_entry_kernel(
+    inputs_embeds_ptr,
+    inputs_embeds_stride,
+    hidden_states_ptr,
+    hidden_states_stride,
+    positions_ptr,
+    enorm_weight_ptr,
+    hnorm_weight_ptr,
+    out_ptr,
+    out_stride,
+    e_eps,
+    h_eps,
+    HIDDEN_SIZE: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    tok_idx = tl.program_id(0)
+    which = tl.program_id(1)  # 0: enorm, 1: hnorm
+
+    offs = tl.arange(0, BLOCK_SIZE)
+    mask = offs < HIDDEN_SIZE
+
+    if which == 0:
+        position = tl.load(positions_ptr + tok_idx)
+        x = tl.load(
+            inputs_embeds_ptr + tok_idx * inputs_embeds_stride + offs,
+            mask=mask,
+            other=0.0,
+        ).to(tl.float32)
+        # Mask out inputs_embeds when position == 0 (MTP convention).
+        keep = (position != 0).to(tl.float32)
+        x = x * keep
+        w = tl.load(enorm_weight_ptr + offs, mask=mask).to(tl.float32)
+        mean_sq = tl.sum(x * x, axis=0) / HIDDEN_SIZE
+        rrms = tl.rsqrt(mean_sq + e_eps)
+        y = (x * rrms) * w
+        tl.store(
+            out_ptr + tok_idx * out_stride + offs,
+            y,
+            mask=mask,
+        )
+    else:
+        h = tl.load(
+            hidden_states_ptr + tok_idx * hidden_states_stride + offs,
+            mask=mask,
+            other=0.0,
+        ).to(tl.float32)
+        w = tl.load(hnorm_weight_ptr + offs, mask=mask).to(tl.float32)
+        mean_sq = tl.sum(h * h, axis=0) / HIDDEN_SIZE
+        rrms = tl.rsqrt(mean_sq + h_eps)
+        y = (h * rrms) * w
+        tl.store(
+            out_ptr + tok_idx * out_stride + HIDDEN_SIZE + offs,
+            y,
+            mask=mask,
+        )
+
+
+@triton.jit
+def _fused_mtp_entry_eps_kernel(
+    inputs_embeds_ptr,
+    inputs_embeds_stride,
+    hidden_states_ptr,
+    hidden_states_stride,
+    positions_ptr,
+    enorm_weight_ptr,
+    hnorm_weight_ptr,
+    e_eps_ptr,
+    h_eps_ptr,
+    out_ptr,
+    out_stride,
+    HIDDEN_SIZE: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    """Same as _fused_mtp_entry_kernel but reads eps from 0-dim tensors."""
+    tok_idx = tl.program_id(0)
+    which = tl.program_id(1)
+
+    offs = tl.arange(0, BLOCK_SIZE)
+    mask = offs < HIDDEN_SIZE
+
+    if which == 0:
+        position = tl.load(positions_ptr + tok_idx)
+        x = tl.load(
+            inputs_embeds_ptr + tok_idx * inputs_embeds_stride + offs,
+            mask=mask,
+            other=0.0,
+        ).to(tl.float32)
+        keep = (position != 0).to(tl.float32)
+        x = x * keep
+        w = tl.load(enorm_weight_ptr + offs, mask=mask).to(tl.float32)
+        mean_sq = tl.sum(x * x, axis=0) / HIDDEN_SIZE
+        e_eps = tl.load(e_eps_ptr)
+        rrms = tl.rsqrt(mean_sq + e_eps)
+        y = (x * rrms) * w
+        tl.store(
+            out_ptr + tok_idx * out_stride + offs,
+            y,
+            mask=mask,
+        )
+    else:
+        h = tl.load(
+            hidden_states_ptr + tok_idx * hidden_states_stride + offs,
+            mask=mask,
+            other=0.0,
+        ).to(tl.float32)
+        w = tl.load(hnorm_weight_ptr + offs, mask=mask).to(tl.float32)
+        mean_sq = tl.sum(h * h, axis=0) / HIDDEN_SIZE
+        h_eps = tl.load(h_eps_ptr)
+        rrms = tl.rsqrt(mean_sq + h_eps)
+        y = (h * rrms) * w
+        tl.store(
+            out_ptr + tok_idx * out_stride + HIDDEN_SIZE + offs,
+            y,
+            mask=mask,
+        )
+
+
+def _fused_mtp_entry_impl(
+    inputs_embeds: torch.Tensor,
+    hidden_states: torch.Tensor,
+    positions: torch.Tensor,
+    enorm_weight: torch.Tensor,
+    hnorm_weight: torch.Tensor,
+    e_eps: torch.Tensor,
+    h_eps: torch.Tensor,
+    out: torch.Tensor,
+) -> torch.Tensor:
+    num_tokens, hidden_size = inputs_embeds.shape
+    BLOCK_SIZE = triton.next_power_of_2(hidden_size)
+    _fused_mtp_entry_eps_kernel[(num_tokens, 2)](
+        inputs_embeds,
+        inputs_embeds.stride(0),
+        hidden_states,
+        hidden_states.stride(0),
+        positions,
+        enorm_weight,
+        hnorm_weight,
+        e_eps,
+        h_eps,
+        out,
+        out.stride(0),
+        HIDDEN_SIZE=hidden_size,
+        BLOCK_SIZE=BLOCK_SIZE,
+        num_warps=8,
+    )
+    return out
+
+
+def _fused_mtp_entry_fake(
+    inputs_embeds: torch.Tensor,
+    hidden_states: torch.Tensor,
+    positions: torch.Tensor,
+    enorm_weight: torch.Tensor,
+    hnorm_weight: torch.Tensor,
+    e_eps: torch.Tensor,
+    h_eps: torch.Tensor,
+    out: torch.Tensor,
+) -> torch.Tensor:
+    del (
+        inputs_embeds,
+        hidden_states,
+        positions,
+        enorm_weight,
+        hnorm_weight,
+        e_eps,
+        h_eps,
+    )
+    return out
+
+
+direct_register_custom_op(
+    op_name="fused_mtp_entry",
+    op_func=_fused_mtp_entry_impl,
+    fake_impl=_fused_mtp_entry_fake,
+    mutates_args=["out"],
+    dispatch_key=current_platform.dispatch_key,
+)
+
+
+def fused_mtp_entry(
+    inputs_embeds: torch.Tensor,
+    hidden_states: torch.Tensor,
+    positions: torch.Tensor,
+    enorm_weight: torch.Tensor,
+    hnorm_weight: torch.Tensor,
+    e_eps: torch.Tensor,
+    h_eps: torch.Tensor,
+) -> torch.Tensor:
+    """Fused: mask(pos==0) + enorm(embeds) | hnorm(hidden) -> concat.
+
+    Output is the concatenation [enorm(embeds), hnorm(hidden)] in the
+    last dim, ready to feed into eh_proj. `e_eps`/`h_eps` are 0-dim fp32
+    tensors (not Python floats) so the custom op stays tensor-only.
+    """
+    num_tokens, hidden_size = inputs_embeds.shape
+    out = torch.empty(
+        num_tokens,
+        hidden_size * 2,
+        dtype=inputs_embeds.dtype,
+        device=inputs_embeds.device,
+    )
+    return torch.ops.vllm.fused_mtp_entry(
+        inputs_embeds,
+        hidden_states,
+        positions,
+        enorm_weight,
+        hnorm_weight,
+        e_eps,
+        h_eps,
+        out,
+    )
 
 
 @triton.jit
