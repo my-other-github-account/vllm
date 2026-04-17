@@ -465,6 +465,15 @@ class EagleSpeculator:
         )
 
         if prefill_batch_desc.cg_mode == CUDAGraphMode.FULL:
+            # It is necessary to rebuild the attention metadata when
+            # replaying the FULL graph so that any attention metadata
+            # builder state is updated.
+            self._build_draft_attn_metadata(
+                num_reqs=num_reqs,
+                num_reqs_padded=prefill_batch_desc.num_reqs or num_reqs,
+                num_tokens_padded=prefill_batch_desc.num_tokens,
+                max_query_len=self.num_speculative_steps + 1,
+            )
             # Replay the full graph for draft prefill.
             assert self.prefill_cudagraph_manager is not None
             self.prefill_cudagraph_manager.run_fullgraph(prefill_batch_desc)
