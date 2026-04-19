@@ -2,9 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from typing import TYPE_CHECKING
+
 import torch
 
 from vllm.logger import init_logger
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.lora_context import MoELoRAContext
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
@@ -91,6 +96,7 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
+        lora_context: "MoELoRAContext | None" = None,
     ) -> torch.Tensor:
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(
@@ -104,4 +110,5 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
             expert_map=None if self.disable_expert_map else layer.expert_map,
             shared_experts_input=shared_experts_input,
+            lora_context=lora_context,
         )

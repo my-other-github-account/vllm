@@ -13,6 +13,7 @@ if TYPE_CHECKING:
         FusedMoEConfig,
         FusedMoEQuantConfig,
     )
+    from vllm.model_executor.layers.fused_moe.lora_context import MoELoRAContext
     from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
 
 import vllm.envs as envs
@@ -506,6 +507,7 @@ class _Fp8OnlineMoEBase(FusedMoEMethodBase):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
+        lora_context: "MoELoRAContext | None" = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert not self.is_monolithic
         assert self.moe_kernel is not None

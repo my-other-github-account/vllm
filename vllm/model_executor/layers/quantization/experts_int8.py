@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.lora_context import MoELoRAContext
 
 import torch
 
@@ -141,6 +144,7 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
+        lora_context: "MoELoRAContext | None" = None,
     ) -> torch.Tensor:
         from vllm.model_executor.layers.fused_moe import fused_experts
 

@@ -6,6 +6,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.lora_context import MoELoRAContext
     from vllm.model_executor.layers.quantization import QuantizationMethods
 
 import gguf
@@ -650,6 +651,7 @@ class GGUFMoEMethod(FusedMoEMethodBase):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
+        lora_context: "MoELoRAContext | None" = None,
     ) -> torch.Tensor:
         if layer.apply_router_weight_on_input:
             raise NotImplementedError(

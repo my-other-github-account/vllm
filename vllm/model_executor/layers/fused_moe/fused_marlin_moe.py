@@ -3,8 +3,12 @@
 """Fused MoE utilities for GPTQ."""
 
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import torch
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.lora_context import MoELoRAContext
 
 import vllm._custom_ops as ops
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -654,6 +658,10 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
 class MarlinExperts(MarlinExpertsBase):
     """Marlin-based fused MoE expert implementation."""
 
+    @staticmethod
+    def supports_lora() -> bool:
+        return True
+
     def supports_expert_map(self) -> bool:
         return True
 
@@ -713,9 +721,109 @@ class MarlinExperts(MarlinExpertsBase):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        lora_context: "MoELoRAContext | None" = None,
     ):
         assert self.w1_scale is not None
         assert self.w2_scale is not None
+
+        if lora_context is None:
+            return fused_marlin_moe(
+                hidden_states=hidden_states,
+                w1=w1,
+                w2=w2,
+                bias1=self.w1_bias,
+                bias2=self.w2_bias,
+                w1_scale=self.w1_scale,
+                w2_scale=self.w2_scale,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                global_scale1=self.g1_alphas,
+                global_scale2=self.g2_alphas,
+                quant_type_id=self.quant_type_id,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                global_num_experts=global_num_experts,
+                activation=activation,
+                activation_func=self.activation,
+                moe_sum=self.moe_sum,
+                expert_map=expert_map,
+                output=output,
+                # Workspaces are swapped in workspace_shapes() to account for proper
+                # output buffer allocation. Please refer to workspace_shapes().
+                intermediate_cache13=workspace2,
+                intermediate_cache2=workspace13,
+                g_idx1=self.w13_g_idx,
+                g_idx2=self.w2_g_idx,
+                sort_indices1=self.w13_g_idx_sort_indices,
+                sort_indices2=self.w2_g_idx_sort_indices,
+                is_k_full=self.is_k_full,
+                input_dtype=self.input_dtype,
+            )
+
+        # LoRA path: wrap activation_func and moe_sum to inject LoRA at the
+        # two natural injection points.
+        #
+        # Marlin uses moe_align_block_size (same as TritonExperts) so
+        # intermediate_cache1 is indexed by flat (token, expert) pair index,
+        # which is compatible with add_lora_fused_moe's scatter mechanism.
+        ctx = lora_context
+        M = hidden_states.size(0)
+        top_k_num = topk_ids.size(1)
+        lora_state: dict = {}
+
+        def activation_with_lora(
+            act_enum: MoEActivation,
+            act_output: torch.Tensor,
+            act_input: torch.Tensor,
+        ) -> None:
+            # act_input  = intermediate_cache1 (M*topk, 2N for gated)
+            # act_output = intermediate_cache2 (M*topk, N)
+            (
+                sorted_token_ids_lora,
+                expert_ids_lora,
+                num_tokens_post_padded_lora,
+                token_lora_mapping,
+                *_,
+            ) = self._apply_w13_lora(
+                ctx,
+                hidden_states,
+                act_input,
+                topk_ids,
+                topk_weights,
+                expert_map,
+                w1,
+                w2,
+                M,
+                top_k_num,
+            )
+            lora_state.update(
+                {
+                    "sorted": sorted_token_ids_lora,
+                    "eids": expert_ids_lora,
+                    "npad": num_tokens_post_padded_lora,
+                    "tlm": token_lora_mapping,
+                }
+            )
+            self.activation(act_enum, act_output, act_input)
+            lora_state["cache2"] = act_output
+
+        def moe_sum_with_lora(moe_out: torch.Tensor, out: torch.Tensor) -> None:
+            # moe_out shape: (M, topk, K) — _apply_w2_lora expects (M, topk, K)
+            self._apply_w2_lora(
+                ctx,
+                lora_state["cache2"],
+                moe_out,
+                topk_weights,
+                lora_state["sorted"],
+                lora_state["eids"],
+                lora_state["npad"],
+                lora_state["tlm"],
+                M,
+                w1,
+                w2,
+                top_k_num,
+            )
+            self.moe_sum(moe_out, out)
+
         return fused_marlin_moe(
             hidden_states=hidden_states,
             w1=w1,
@@ -732,12 +840,10 @@ class MarlinExperts(MarlinExpertsBase):
             apply_router_weight_on_input=apply_router_weight_on_input,
             global_num_experts=global_num_experts,
             activation=activation,
-            activation_func=self.activation,
-            moe_sum=self.moe_sum,
+            activation_func=activation_with_lora,
+            moe_sum=moe_sum_with_lora,
             expert_map=expert_map,
             output=output,
-            # Workspaces are swapped in workspace_shapes() to account for proper
-            # output buffer allocation. Please refer to workspace_shapes().
             intermediate_cache13=workspace2,
             intermediate_cache2=workspace13,
             g_idx1=self.w13_g_idx,

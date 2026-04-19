@@ -96,6 +96,7 @@ from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.utils.flashinfer import flashinfer_trtllm_fp8_block_scale_moe
 
 if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.lora_context import MoELoRAContext
     from vllm.model_executor.models.utils import WeightsMapper
 
 logger = init_logger(__name__)
@@ -973,6 +974,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
+        lora_context: "MoELoRAContext | None" = None,
     ) -> torch.Tensor:
         assert not self.is_monolithic
         assert self.moe_kernel is not None
@@ -1465,6 +1467,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
+        lora_context: "MoELoRAContext | None" = None,
     ) -> torch.Tensor:
         assert not self.is_monolithic
         assert self.moe_kernel is not None
@@ -2003,6 +2006,7 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
+        lora_context: "MoELoRAContext | None" = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert not self.is_monolithic
         raise NotImplementedError(

@@ -5,9 +5,12 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from math import prod
-from typing import final
+from typing import TYPE_CHECKING, final
 
 import torch
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.lora_context import MoELoRAContext
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -253,6 +256,16 @@ class FusedMoEPrepareAndFinalizeModular(FusedMoEPrepareAndFinalize):
     An abstract base class for the [Quantize-Prepare] and [Finalize] steps
     described above for the Modular case.
     """
+
+    @staticmethod
+    def supports_lora() -> bool:
+        """Return True if this prepare/finalize impl can propagate LoRA context.
+
+        Non-EP implementations support LoRA by default.  EP-aware
+        implementations must override this to True once they can dispatch
+        lora_ids alongside hidden states in their all2all call (Task 2).
+        """
+        return True
 
     @abstractmethod
     def prepare(
@@ -734,6 +747,17 @@ class FusedMoEExperts(ABC):
     def g2_alphas(self) -> torch.Tensor | None:
         return self.quant_config.g2_alphas
 
+    @staticmethod
+    def supports_lora() -> bool:
+        """Return True if this expert impl natively handles MoELoRAContext.
+
+        When True, FusedMoEWithLoRA will propagate a MoELoRAContext through
+        FusedMoEKernel.apply() instead of using the legacy decorator injection.
+        Subclasses that inline the LoRA computation inside apply() must override
+        this to return True.
+        """
+        return False
+
     @abstractmethod
     def supports_expert_map(self) -> bool:
         """
@@ -896,6 +920,7 @@ class FusedMoEExpertsModular(FusedMoEExperts):
         workspace2: torch.Tensor,
         expert_tokens_meta: ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        lora_context: "MoELoRAContext | None" = None,
     ) -> None:
         """
         This function computes the intermediate result of a Mixture of Experts
@@ -933,6 +958,252 @@ class FusedMoEExpertsModular(FusedMoEExperts):
           chooses to do weight application.
         """
         raise NotImplementedError
+
+    # -------------------------------------------------------------------------
+    # Shared LoRA helpers
+    #
+    # The LoRA operators (add_lora_fused_moe / moe_lora_align_block_size) are
+    # Triton kernels that operate on fp16/bf16 activation tensors and are
+    # independent of the main GEMM quantization backend.  Any modular expert
+    # backend can call these helpers from its apply() at the two natural
+    # injection points:
+    #   • after the w13 GEMM, before activation  (_apply_w13_lora)
+    #   • after the w2  GEMM, before moe_sum     (_apply_w2_lora)
+    #
+    # block_shape is the only backend-specific knob: pass self.block_shape for
+    # quantized backends; omit (None) for unquantized ones.
+    # -------------------------------------------------------------------------
+
+    def _apply_w13_lora(
+        self,
+        lora_context: "MoELoRAContext",
+        hidden_states: torch.Tensor,
+        intermediate_cache1: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+        expert_map: torch.Tensor | None,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        num_tokens: int,
+        top_k_num: int,
+        *,
+        block_shape: list[int] | None = None,
+    ):
+        import functools
+
+        from vllm.lora.layers.utils import try_get_optimal_moe_lora_config
+        from vllm.lora.ops.triton_ops.utils import get_lora_op_configs
+        from vllm.model_executor.layers.fused_moe.config import _get_config_dtype_str
+        from vllm.model_executor.layers.fused_moe.lora_context import (
+            _normalize_lora_config_keys,
+        )
+
+        ctx = lora_context
+        config_dtype = _get_config_dtype_str(
+            dtype=hidden_states.dtype,
+            use_fp8_w8a8=False,
+            use_int8_w8a16=False,
+            use_int4_w4a16=False,
+        )
+        max_lora_rank = ctx.w13_lora_a_stacked[0].shape[-2]
+
+        if ctx.use_tuned_config:
+            hidden_size = hidden_states.shape[-1]
+            intermediate_size = ctx.w13_lora_b_stacked[0].shape[-2]
+            shrink_config = get_lora_op_configs(
+                op_type="fused_moe_lora_w13_shrink",
+                max_loras=ctx.max_loras,
+                batch=num_tokens,
+                hidden_size=hidden_size,
+                rank=max_lora_rank,
+                num_slices=ctx.w13_num_slices,
+                moe_intermediate_size=intermediate_size,
+            )
+            expand_config = get_lora_op_configs(
+                op_type="fused_moe_lora_w13_expand",
+                max_loras=ctx.max_loras,
+                batch=num_tokens,
+                hidden_size=hidden_size,
+                rank=max_lora_rank,
+                num_slices=ctx.w13_num_slices,
+                moe_intermediate_size=intermediate_size,
+            )
+        else:
+            get_config_func = functools.partial(
+                try_get_optimal_moe_lora_config,
+                w1_shape=w1.shape,
+                w2_shape=w2.shape,
+                rank=max_lora_rank,
+                top_k=ctx.top_k,
+                dtype=config_dtype,
+                M=num_tokens,
+                block_shape=block_shape,
+            )
+            shrink_config = get_config_func(op_type="fused_moe_lora_w13_shrink")
+            expand_config = get_config_func(op_type="fused_moe_lora_w13_expand")
+
+        shrink_config = _normalize_lora_config_keys(shrink_config)
+        expand_config = _normalize_lora_config_keys(expand_config)
+
+        SPARSITY_FACTOR = 8
+        naive_block_assignment = (
+            expert_map is None
+            and num_tokens * ctx.top_k * SPARSITY_FACTOR
+            <= ctx.local_num_experts * ctx.max_loras
+        )
+
+        (
+            token_lora_mapping,
+            sorted_token_ids_lora,
+            expert_ids_lora,
+            num_tokens_post_padded_lora,
+        ) = ctx.punica_wrapper.moe_lora_align_block_size(
+            topk_ids,
+            num_tokens,
+            shrink_config["BLOCK_SIZE_M"],
+            ctx.local_num_experts,
+            ctx.max_loras,
+            ctx.adapter_enabled,
+            expert_map,
+            naive_block_assignment=naive_block_assignment,
+        )
+
+        _sorted_token_ids_lora = sorted_token_ids_lora
+        _expert_ids_lora = expert_ids_lora
+        if _sorted_token_ids_lora is not None:
+            _expert_ids_lora = _expert_ids_lora.view(ctx.max_loras, -1)
+            _sorted_token_ids_lora = _sorted_token_ids_lora.view(ctx.max_loras, -1)
+
+        ctx.punica_wrapper.add_lora_fused_moe(
+            intermediate_cache1.view(-1, top_k_num, intermediate_cache1.shape[-1]),
+            hidden_states,
+            ctx.w13_lora_a_stacked,
+            ctx.w13_lora_b_stacked,
+            topk_weights,
+            _sorted_token_ids_lora,
+            _expert_ids_lora,
+            num_tokens_post_padded_lora,
+            max_lora_rank,
+            ctx.top_k,
+            shrink_config,
+            expand_config,
+            ctx.adapter_enabled,
+            fully_sharded=ctx.fully_sharded,
+            token_lora_mapping=token_lora_mapping,
+        )
+
+        return (
+            sorted_token_ids_lora,
+            expert_ids_lora,
+            num_tokens_post_padded_lora,
+            token_lora_mapping,
+            shrink_config,
+            expand_config,
+        )
+
+    def _apply_w2_lora(
+        self,
+        lora_context: "MoELoRAContext",
+        intermediate_cache2: torch.Tensor,
+        intermediate_cache3: torch.Tensor,
+        topk_weights: torch.Tensor,
+        sorted_token_ids_lora: torch.Tensor | None,
+        expert_ids_lora: torch.Tensor | None,
+        num_tokens_post_padded_lora: torch.Tensor | None,
+        token_lora_mapping: torch.Tensor | None,
+        num_tokens: int,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        top_k_num: int,
+        *,
+        block_shape: list[int] | None = None,
+    ):
+        import functools
+
+        from vllm.lora.layers.utils import try_get_optimal_moe_lora_config
+        from vllm.lora.ops.triton_ops.utils import get_lora_op_configs
+        from vllm.model_executor.layers.fused_moe.config import _get_config_dtype_str
+        from vllm.model_executor.layers.fused_moe.lora_context import (
+            _normalize_lora_config_keys,
+        )
+
+        ctx = lora_context
+        config_dtype = _get_config_dtype_str(
+            dtype=intermediate_cache2.dtype,
+            use_fp8_w8a8=False,
+            use_int8_w8a16=False,
+            use_int4_w4a16=False,
+        )
+        max_lora_rank = ctx.w2_lora_a_stacked[0].shape[-2]
+
+        if ctx.use_tuned_config:
+            hidden_size = intermediate_cache3.shape[-1]
+            intermediate_size = ctx.w2_lora_a_stacked[0].shape[-1]
+            shrink_config = get_lora_op_configs(
+                op_type="fused_moe_lora_w2_shrink",
+                max_loras=ctx.max_loras,
+                batch=num_tokens,
+                hidden_size=hidden_size,
+                rank=max_lora_rank,
+                num_slices=1,
+                moe_intermediate_size=intermediate_size,
+            )
+            expand_config = get_lora_op_configs(
+                op_type="fused_moe_lora_w2_expand",
+                max_loras=ctx.max_loras,
+                batch=num_tokens,
+                hidden_size=hidden_size,
+                rank=max_lora_rank,
+                num_slices=1,
+                moe_intermediate_size=intermediate_size,
+            )
+        else:
+            get_config_func = functools.partial(
+                try_get_optimal_moe_lora_config,
+                w1_shape=w1.shape,
+                w2_shape=w2.shape,
+                rank=max_lora_rank,
+                top_k=ctx.top_k,
+                dtype=config_dtype,
+                M=num_tokens,
+                block_shape=block_shape,
+            )
+            shrink_config = get_config_func(op_type="fused_moe_lora_w2_shrink")
+            expand_config = get_config_func(op_type="fused_moe_lora_w2_expand")
+
+        shrink_config = _normalize_lora_config_keys(shrink_config)
+        expand_config = _normalize_lora_config_keys(expand_config)
+
+        _sorted_token_ids_lora = sorted_token_ids_lora
+        _expert_ids_lora = expert_ids_lora
+        if _sorted_token_ids_lora is not None:
+            _expert_ids_lora = _expert_ids_lora.view(ctx.max_loras, -1)
+            _sorted_token_ids_lora = _sorted_token_ids_lora.view(ctx.max_loras, -1)
+
+        # w2_lora_b shape[-2] is hidden_size // tp_size when fully_sharded,
+        # matching divide(base_layer.hidden_size, tp_size).
+        shard_size_w2 = ctx.w2_lora_b_stacked[0].shape[-2]
+        offset = shard_size_w2 * ctx.tp_rank if ctx.fully_sharded else 0
+
+        ctx.punica_wrapper.add_lora_fused_moe(
+            intermediate_cache3,
+            intermediate_cache2,
+            ctx.w2_lora_a_stacked,
+            ctx.w2_lora_b_stacked,
+            topk_weights,
+            _sorted_token_ids_lora,
+            _expert_ids_lora,
+            num_tokens_post_padded_lora,
+            max_lora_rank,
+            ctx.top_k,
+            shrink_config,
+            expand_config,
+            ctx.adapter_enabled,
+            True,  # is_w2
+            fully_sharded=ctx.fully_sharded,
+            offset=offset,
+            token_lora_mapping=token_lora_mapping,
+        )
 
 
 class FusedMoEExpertsMonolithic(FusedMoEExperts):
@@ -1204,6 +1475,7 @@ class FusedMoEKernelModularImpl:
         expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
         expert_tokens_meta: ExpertTokensMetadata | None,
+        lora_context: "MoELoRAContext | None" = None,
     ) -> torch.Tensor:
         _, M_full, N, K, top_k = self.fused_experts.moe_problem_size(
             a1q, w1, w2, topk_ids
@@ -1248,6 +1520,7 @@ class FusedMoEKernelModularImpl:
             workspace2=workspace2,
             expert_tokens_meta=expert_tokens_meta,
             apply_router_weight_on_input=apply_router_weight_on_input,
+            lora_context=lora_context,
         )
 
         return fused_out
@@ -1330,6 +1603,7 @@ class FusedMoEKernelModularImpl:
         expert_map: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
         shared_experts_input: torch.Tensor | None = None,
+        lora_context: "MoELoRAContext | None" = None,
     ) -> torch.Tensor:
         """
         This function computes a Mixture of Experts (MoE) layer using two sets
@@ -1354,6 +1628,8 @@ class FusedMoEKernelModularImpl:
         - shared_experts_input (Optional[torch.Tensor]): Optional separate
           input for shared experts. For latent MoE, this is the original
           hidden_states before latent projection.
+        - lora_context (Optional[MoELoRAContext]): LoRA context to propagate to
+          fused_experts.apply() when the expert backend supports native LoRA.
 
         Returns:
         - torch.Tensor: The output tensor after applying the MoE layer.
@@ -1392,6 +1668,7 @@ class FusedMoEKernelModularImpl:
             expert_map=expert_map,
             apply_router_weight_on_input=apply_router_weight_on_input,
             expert_tokens_meta=expert_tokens_meta,
+            lora_context=lora_context,
         )
 
         return self._finalize(
@@ -1595,6 +1872,7 @@ class FusedMoEKernel:
         expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
         shared_experts_input: torch.Tensor | None = None,
+        lora_context: "MoELoRAContext | None" = None,
     ) -> torch.Tensor:
         assert isinstance(self.impl, FusedMoEKernelModularImpl)
         return self.impl.apply(
@@ -1608,4 +1886,5 @@ class FusedMoEKernel:
             expert_map=expert_map,
             apply_router_weight_on_input=apply_router_weight_on_input,
             shared_experts_input=shared_experts_input,
+            lora_context=lora_context,
         )

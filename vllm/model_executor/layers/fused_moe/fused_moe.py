@@ -6,7 +6,10 @@ import functools
 import json
 import os
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.lora_context import MoELoRAContext
 
 import torch
 
@@ -1974,6 +1977,10 @@ class TritonExperts(mk.FusedMoEExpertsModular):
     def _supports_batch_invariance():
         return True
 
+    @staticmethod
+    def supports_lora() -> bool:
+        return True
+
     def supports_expert_map(self) -> bool:
         return True
 
@@ -2014,6 +2021,7 @@ class TritonExperts(mk.FusedMoEExpertsModular):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        lora_context: "MoELoRAContext | None" = None,
     ):
         # Check constraints.
         if self.quant_config.use_int4_w4a16:
@@ -2100,6 +2108,35 @@ class TritonExperts(mk.FusedMoEExpertsModular):
             B_bias=self.w1_bias,
         )
 
+        # LoRA w13: applied to intermediate_cache1 before activation, using
+        # hidden_states as the lora_a input.  moe_lora_align_block_size is
+        # called once here and results reused for the w2 LoRA below.
+        sorted_token_ids_lora = None
+        expert_ids_lora = None
+        num_tokens_post_padded_lora = None
+        token_lora_mapping = None
+        if lora_context is not None:
+            (
+                sorted_token_ids_lora,
+                expert_ids_lora,
+                num_tokens_post_padded_lora,
+                token_lora_mapping,
+                shrink_config_w13,
+                expand_config_w13,
+            ) = self._apply_w13_lora(
+                lora_context,
+                hidden_states,
+                intermediate_cache1,
+                topk_ids,
+                topk_weights,
+                expert_map,
+                w1,
+                w2,
+                num_tokens,
+                top_k_num,
+                block_shape=self.block_shape,
+            )
+
         self.activation(
             activation, intermediate_cache2, intermediate_cache1.view(-1, N)
         )
@@ -2136,6 +2173,26 @@ class TritonExperts(mk.FusedMoEExpertsModular):
             block_shape=self.block_shape,
             B_bias=self.w2_bias,
         )
+
+        # LoRA w2: applied to intermediate_cache3 before moe_sum, using the
+        # unquantized intermediate_cache2 as the lora_a input.  Reuses the
+        # sorted_token_ids_lora computed above.
+        if lora_context is not None:
+            self._apply_w2_lora(
+                lora_context,
+                intermediate_cache2,
+                intermediate_cache3,
+                topk_weights,
+                sorted_token_ids_lora,
+                expert_ids_lora,
+                num_tokens_post_padded_lora,
+                token_lora_mapping,
+                num_tokens,
+                w1,
+                w2,
+                top_k_num,
+                block_shape=self.block_shape,
+            )
 
         # separate function is required for MoE + LoRA
         self.moe_sum(intermediate_cache3, output)

@@ -86,6 +86,7 @@ from vllm.utils.deep_gemm import (
 )
 
 if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.lora_context import MoELoRAContext
     from vllm.model_executor.models.utils import WeightsMapper
 
 ACTIVATION_SCHEMES = ["static", "dynamic"]
@@ -899,6 +900,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
+        lora_context: "MoELoRAContext | None" = None,
     ) -> torch.Tensor:
         assert not self.is_monolithic
         assert self.moe_kernel is not None
