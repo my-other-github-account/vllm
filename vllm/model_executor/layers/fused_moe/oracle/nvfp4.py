@@ -162,10 +162,9 @@ def select_nvfp4_moe_backend(
     # NOTE(rob): this is kind of a hack. We need to peak into
     # the prepare-finalize selection to determine if we are using
     # the batched or standard expert format.
-    use_batched = config.moe_parallel_config.use_deepep_ll_kernels
     activation_format = (
         mk.FusedMoEActivationFormat.BatchedExperts
-        if use_batched
+        if config.moe_parallel_config.use_batched_activation_format
         else mk.FusedMoEActivationFormat.Standard
     )
 
@@ -205,16 +204,22 @@ def select_nvfp4_moe_backend(
 
         raise ValueError(_make_log_unsupported(backend, reason))
 
+    def _resolve_requested_backend(
+        backend: NvFp4MoeBackend,
+    ) -> NvFp4MoeBackend:
+        if (
+            activation_format == mk.FusedMoEActivationFormat.BatchedExperts
+            and backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL
+        ):
+            return NvFp4MoeBackend.FLASHINFER_CUTEDSL_BATCHED
+        return backend
+
     # Handle explicit moe_backend from user.
     runner_backend = config.moe_backend
     if runner_backend != "auto":
-        requested_backend = map_nvfp4_backend(runner_backend)
-        # For batched activation format, use batched variant if available.
-        if (
-            activation_format == mk.FusedMoEActivationFormat.BatchedExperts
-            and requested_backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL
-        ):
-            requested_backend = NvFp4MoeBackend.FLASHINFER_CUTEDSL_BATCHED
+        requested_backend = _resolve_requested_backend(
+            map_nvfp4_backend(runner_backend)
+        )
         return _return_or_raise(
             requested_backend, config, weight_key, activation_key, activation_format
         )
@@ -227,7 +232,9 @@ def select_nvfp4_moe_backend(
 
         elif envs.is_set("VLLM_FLASHINFER_MOE_BACKEND"):
             # If user is explicit about backend, validate it.
-            backend = fi_2_vllm_backend_map[get_flashinfer_moe_backend()]
+            backend = _resolve_requested_backend(
+                fi_2_vllm_backend_map[get_flashinfer_moe_backend()]
+            )
             return _return_or_raise(
                 backend, config, weight_key, activation_key, activation_format
             )

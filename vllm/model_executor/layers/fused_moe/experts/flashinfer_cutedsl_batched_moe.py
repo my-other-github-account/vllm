@@ -4,7 +4,6 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm import envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
@@ -126,7 +125,7 @@ class FlashInferCuteDSLBatchedExperts(mk.FusedMoEExpertsModular):
 
         # We use global_num_experts due to how moe_align_block_size handles
         # expert_maps.
-        K_dim = K * 2 if envs.VLLM_DEEPEPLL_NVFP4_DISPATCH else K
+        K_dim = self.moe_config.hidden_dim if self.moe_config.hidden_dim == K * 2 else K
         output_shape = (local_num_experts, M, K_dim)
         workspace2 = (local_num_experts, M, N)
         workspace1 = output_shape
@@ -163,13 +162,12 @@ class FlashInferCuteDSLBatchedExperts(mk.FusedMoEExpertsModular):
         assert self.w1_scale.ndim == 3
         assert self.w2_scale.ndim == 3
 
-        input_global_scale = (
-            None if envs.VLLM_DEEPEPLL_NVFP4_DISPATCH else self.a1_gscale
+        use_prequantized_inputs = (
+            a1q_scale is not None and hidden_states.dtype == torch.uint8
         )
+        input_global_scale = None if use_prequantized_inputs else self.a1_gscale
         flashinfer_hidden_states = (
-            (hidden_states, a1q_scale)
-            if envs.VLLM_DEEPEPLL_NVFP4_DISPATCH
-            else hidden_states
+            (hidden_states, a1q_scale) if use_prequantized_inputs else hidden_states
         )
         flashinfer_cutedsl_moe_masked(
             hidden_states=flashinfer_hidden_states,
