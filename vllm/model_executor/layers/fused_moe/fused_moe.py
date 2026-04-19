@@ -9,7 +9,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from vllm.model_executor.layers.fused_moe.lora_context import MoELoRAContext
+    from vllm.lora.lora_context import MoELoRAContext
 
 import torch
 
@@ -2121,20 +2121,17 @@ class TritonExperts(mk.FusedMoEExpertsModular):
                 expert_ids_lora,
                 num_tokens_post_padded_lora,
                 token_lora_mapping,
-                shrink_config_w13,
-                expand_config_w13,
-            ) = self._apply_w13_lora(
+            ) = self.apply_w13_lora(
                 lora_context,
-                hidden_states,
-                intermediate_cache1,
-                topk_ids,
-                topk_weights,
-                expert_map,
-                w1,
-                w2,
-                num_tokens,
-                top_k_num,
-                block_shape=self.block_shape,
+                y=intermediate_cache1,
+                x=hidden_states,
+                topk_ids=topk_ids,
+                topk_weights=topk_weights,
+                expert_map=expert_map,
+                w1=w1,
+                w2=w2,
+                num_tokens=num_tokens,
+                top_k_num=top_k_num,
             )
 
         self.activation(
@@ -2178,20 +2175,19 @@ class TritonExperts(mk.FusedMoEExpertsModular):
         # unquantized intermediate_cache2 as the lora_a input.  Reuses the
         # sorted_token_ids_lora computed above.
         if lora_context is not None:
-            self._apply_w2_lora(
+            self.apply_w2_lora(
                 lora_context,
-                intermediate_cache2,
-                intermediate_cache3,
-                topk_weights,
-                sorted_token_ids_lora,
-                expert_ids_lora,
-                num_tokens_post_padded_lora,
-                token_lora_mapping,
-                num_tokens,
-                w1,
-                w2,
-                top_k_num,
-                block_shape=self.block_shape,
+                y=intermediate_cache3,
+                x=intermediate_cache2,
+                topk_weights=topk_weights,
+                sorted_token_ids_lora=sorted_token_ids_lora,
+                expert_ids_lora=expert_ids_lora,
+                num_tokens_post_padded_lora=num_tokens_post_padded_lora,
+                token_lora_mapping=token_lora_mapping,
+                num_tokens=num_tokens,
+                w1=w1,
+                w2=w2,
+                top_k_num=top_k_num,
             )
 
         # separate function is required for MoE + LoRA

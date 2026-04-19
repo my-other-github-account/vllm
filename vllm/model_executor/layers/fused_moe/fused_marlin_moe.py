@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 import torch
 
 if TYPE_CHECKING:
-    from vllm.model_executor.layers.fused_moe.lora_context import MoELoRAContext
+    from vllm.lora.lora_context import MoELoRAContext
 
 import vllm._custom_ops as ops
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -782,18 +782,17 @@ class MarlinExperts(MarlinExpertsBase):
                 expert_ids_lora,
                 num_tokens_post_padded_lora,
                 token_lora_mapping,
-                *_,
-            ) = self._apply_w13_lora(
+            ) = self.apply_w13_lora(
                 ctx,
-                hidden_states,
-                act_input,
-                topk_ids,
-                topk_weights,
-                expert_map,
-                w1,
-                w2,
-                M,
-                top_k_num,
+                y=act_input,
+                x=hidden_states,
+                topk_ids=topk_ids,
+                topk_weights=topk_weights,
+                expert_map=expert_map,
+                w1=w1,
+                w2=w2,
+                num_tokens=M,
+                top_k_num=top_k_num,
             )
             lora_state.update(
                 {
@@ -807,20 +806,20 @@ class MarlinExperts(MarlinExpertsBase):
             lora_state["cache2"] = act_output
 
         def moe_sum_with_lora(moe_out: torch.Tensor, out: torch.Tensor) -> None:
-            # moe_out shape: (M, topk, K) — _apply_w2_lora expects (M, topk, K)
-            self._apply_w2_lora(
+            # moe_out shape: (M, topk, K)
+            self.apply_w2_lora(
                 ctx,
-                lora_state["cache2"],
-                moe_out,
-                topk_weights,
-                lora_state["sorted"],
-                lora_state["eids"],
-                lora_state["npad"],
-                lora_state["tlm"],
-                M,
-                w1,
-                w2,
-                top_k_num,
+                y=moe_out,
+                x=lora_state["cache2"],
+                topk_weights=topk_weights,
+                sorted_token_ids_lora=lora_state["sorted"],
+                expert_ids_lora=lora_state["eids"],
+                num_tokens_post_padded_lora=lora_state["npad"],
+                token_lora_mapping=lora_state["tlm"],
+                num_tokens=M,
+                w1=w1,
+                w2=w2,
+                top_k_num=top_k_num,
             )
             self.moe_sum(moe_out, out)
 

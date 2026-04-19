@@ -27,16 +27,12 @@ def _normalize_lora_config_keys(
 @dataclass
 class MoELoRAContext:
     """
-    Carries all LoRA state for MoE forward passes.
+    Carries all LoRA state for one MoE forward pass.
 
-    Built once by FusedMoEWithLoRA.set_mapping() and stored permanently on the
-    base FusedMoE layer as _lora_context.  Propagated explicitly through the
+    Built by FusedMoEWithLoRA.forward() and propagated explicitly through the
     modular kernel path (FusedMoEKernel -> FusedMoEExpertsModular.apply) so
-    that TritonExperts.apply() can compute the LoRA contribution inline.
-
-    All tensor fields are stored by reference so in-place updates (set_lora,
-    reset_lora, adapter_enabled) and punica_wrapper state updates are visible
-    without rebuilding the context.
+    that TritonExperts.apply() can compute the LoRA contribution inline,
+    replacing the decorator-based monkey-patch approach.
 
     Typed as Any for punica_wrapper to avoid a circular import at module load
     time: vllm.lora imports vllm.model_executor.layers.fused_moe, so the
@@ -56,7 +52,7 @@ class MoELoRAContext:
     # Metadata
     max_loras: int
     top_k: int
-    w13_num_slices: int  # 2 = gated (gate + up), 1 = non-gated or 3D-fused
+    w13_num_slices: int     # 2 = gated (gate + up), 1 = non-gated or 3D-fused
     fully_sharded: bool
     tp_rank: int
     tp_size: int

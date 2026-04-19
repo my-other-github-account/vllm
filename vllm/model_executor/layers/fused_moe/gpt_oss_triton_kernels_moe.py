@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 import torch
 
 if TYPE_CHECKING:
-    from vllm.model_executor.layers.fused_moe.lora_context import MoELoRAContext
+    from vllm.lora.lora_context import MoELoRAContext
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
@@ -800,19 +800,17 @@ class UnfusedOAITritonExperts(BaseOAITritonExperts):
                 expert_ids_lora,
                 num_tokens_post_padded_lora,
                 token_lora_mapping,
-                _,
-                _,
-            ) = self._apply_w13_lora(
+            ) = self.apply_w13_lora(
                 lora_context,
-                hidden_states,
-                act_input,
-                topk_ids,
-                topk_weights,
-                None,  # expert_map already applied above
-                w1,
-                w2,
-                M,
-                topk,
+                y=act_input,
+                x=hidden_states,
+                topk_ids=topk_ids,
+                topk_weights=topk_weights,
+                expert_map=None,  # already applied above
+                w1=w1,
+                w2=w2,
+                num_tokens=M,
+                top_k_num=topk,
             )
 
         self.activation(
@@ -838,22 +836,21 @@ class UnfusedOAITritonExperts(BaseOAITritonExperts):
         )
 
         # w2 LoRA: after matmul_ogs with scatter_indx, intermediate_cache3 is
-        # in token-topk order, matching the standard (M, topk, K) layout that
-        # _apply_w2_lora expects.
+        # in token-topk order, matching the (M, topk, K) layout add_lora_w2 expects.
         if lora_context is not None:
-            self._apply_w2_lora(
+            self.apply_w2_lora(
                 lora_context,
-                intermediate_cache2,
-                intermediate_cache3.view(-1, topk, K),
-                topk_weights,
-                sorted_token_ids_lora,
-                expert_ids_lora,
-                num_tokens_post_padded_lora,
-                token_lora_mapping,
-                M,
-                w1,
-                w2,
-                topk,
+                y=intermediate_cache3.view(-1, topk, K),
+                x=intermediate_cache2,
+                topk_weights=topk_weights,
+                sorted_token_ids_lora=sorted_token_ids_lora,
+                expert_ids_lora=expert_ids_lora,
+                num_tokens_post_padded_lora=num_tokens_post_padded_lora,
+                token_lora_mapping=token_lora_mapping,
+                num_tokens=M,
+                w1=w1,
+                w2=w2,
+                top_k_num=topk,
             )
 
         self.moe_sum(intermediate_cache3.view(-1, topk, K), output)

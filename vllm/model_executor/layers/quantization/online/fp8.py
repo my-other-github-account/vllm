@@ -8,12 +8,12 @@ from torch.nn import Module
 
 if TYPE_CHECKING:
     import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+    from vllm.lora.lora_context import MoELoRAContext
     from vllm.model_executor.layers.fused_moe import FusedMoE
     from vllm.model_executor.layers.fused_moe.config import (
         FusedMoEConfig,
         FusedMoEQuantConfig,
     )
-    from vllm.model_executor.layers.fused_moe.lora_context import MoELoRAContext
     from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
 
 import vllm.envs as envs
