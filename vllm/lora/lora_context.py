@@ -52,7 +52,7 @@ class MoELoRAContext:
     # Metadata
     max_loras: int
     top_k: int
-    w13_num_slices: int     # 2 = gated (gate + up), 1 = non-gated or 3D-fused
+    w13_num_slices: int  # 2 = gated (gate + up), 1 = non-gated or 3D-fused
     fully_sharded: bool
     tp_rank: int
     tp_size: int
