@@ -240,8 +240,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self, output_tensor: torch.Tensor, input_: torch.Tensor
     ) -> torch.Tensor:
         pynccl_comm = self.pynccl_comm
-        if pynccl_comm is None or pynccl_comm.disabled:
-            return super().all_gather_into_tensor(output_tensor, input_)
+        assert pynccl_comm is not None and not pynccl_comm.disabled
         pynccl_comm.all_gather(output_tensor, input_)
         return output_tensor
 
@@ -249,8 +248,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self, output_tensor: torch.Tensor, input_tensor: torch.Tensor
     ) -> torch.Tensor:
         pynccl_comm = self.pynccl_comm
-        if pynccl_comm is None or pynccl_comm.disabled:
-            return super().reduce_scatter_tensor(output_tensor, input_tensor)
+        assert pynccl_comm is not None and not pynccl_comm.disabled
         pynccl_comm.reduce_scatter(output_tensor, input_tensor)
         return output_tensor
 

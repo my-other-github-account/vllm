@@ -188,6 +188,9 @@ class DeviceCommunicatorBase:
             "Invalid output shape for all_gather_into_tensor: "
             f"expected {expected_output_size}, got {tuple(output_tensor.shape)}"
         )
+        assert input_.is_contiguous(), (
+            "all_gather_into_tensor requires a contiguous input tensor"
+        )
         assert output_tensor.is_contiguous(), (
             "all_gather_into_tensor requires a contiguous output tensor"
         )
@@ -208,7 +211,7 @@ class DeviceCommunicatorBase:
             output_size, dtype=input_.dtype, device=input_.device
         )
         # All-gather.
-        self.all_gather_into_tensor(output_tensor, input_.contiguous())
+        self.all_gather_into_tensor(output_tensor, input_)
         # Reshape
         output_tensor = output_tensor.reshape((self.world_size,) + input_size)
         output_tensor = output_tensor.movedim(0, dim)
