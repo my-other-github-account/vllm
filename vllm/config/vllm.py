@@ -64,7 +64,7 @@ else:
 
 logger = init_logger(__name__)
 
-DEFAULT_V2_MODEL_RUNNER_WHITELIST = frozenset(
+DEFAULT_V2_MODEL_RUNNER_MODELS = frozenset(
     {
         "Qwen/Qwen3-0.6B",
         # "facebook/opt-125m",  # a lot of unit tests assert v1 specific feature
@@ -485,6 +485,12 @@ class VllmConfig:
         if use_v2_model_runner is not None:
             return use_v2_model_runner
 
+        if (
+            self.model_config is None
+            or self.model_config.model not in DEFAULT_V2_MODEL_RUNNER_MODELS
+        ):
+            return False
+
         # TODO: ngram / ngram_gpu are not supported by the v2 model runner yet
         if self.speculative_config is not None and (
             self.speculative_config.method in ("ngram", "ngram_gpu")
@@ -504,10 +510,7 @@ class VllmConfig:
             )
             return False
 
-        return (
-            self.model_config is not None
-            and self.model_config.model in DEFAULT_V2_MODEL_RUNNER_WHITELIST
-        )
+        return True
 
     @property
     def needs_dp_coordinator(self) -> bool:
