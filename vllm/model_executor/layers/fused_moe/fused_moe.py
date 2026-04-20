@@ -2253,6 +2253,7 @@ class TritonWNA16Experts(TritonExperts):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        lora_context: "MoELoRAContext | None" = None,
     ):
         # Check constraints.
         if self.quant_config.use_int4_w4a16:

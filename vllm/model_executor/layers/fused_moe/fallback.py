@@ -2,8 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING
 
 import torch
+
+if TYPE_CHECKING:
+    from vllm.lora.lora_context import MoELoRAContext
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -159,6 +163,7 @@ class FallbackExperts(mk.FusedMoEExpertsModular, ABC):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        lora_context: "MoELoRAContext | None" = None,
     ):
         experts = self._select_experts_impl(hidden_states, w1, w2)
         experts.apply(
@@ -177,4 +182,5 @@ class FallbackExperts(mk.FusedMoEExpertsModular, ABC):
             workspace2,
             expert_tokens_meta,
             apply_router_weight_on_input,
+            lora_context=lora_context,
         )

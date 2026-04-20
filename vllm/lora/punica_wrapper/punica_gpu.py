@@ -555,7 +555,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         ) = self.moe_lora_align_block_size(
             topk_ids,
             num_tokens,
-            shrink_config["BLOCK_SIZE_M"],
+            int(shrink_config.get("BLOCK_SIZE_M") or 64),
             local_num_experts,
             max_loras,
             adapter_enabled,
@@ -674,6 +674,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         _sorted = sorted_token_ids_lora
         _eids = expert_ids_lora
         if _sorted is not None:
+            assert _eids is not None
             _eids = _eids.view(max_loras, -1)
             _sorted = _sorted.view(max_loras, -1)
 

@@ -3,8 +3,12 @@
 
 import enum
 from enum import Enum
+from typing import TYPE_CHECKING
 
 import torch
+
+if TYPE_CHECKING:
+    from vllm.lora.lora_context import MoELoRAContext
 from compressed_tensors.quantization import (
     QuantizationArgs,
 )
@@ -545,6 +549,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
+        lora_context: "MoELoRAContext | None" = None,
     ) -> torch.Tensor:
         assert self.kernel_backend == "Marlin"
         return fused_marlin_moe(

@@ -623,6 +623,7 @@ class OAITritonExperts(BaseOAITritonExperts):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        lora_context: "MoELoRAContext | None" = None,
     ):
         if self.quant_config is None:
             self.quant_config: FusedMoEQuantConfig = FUSED_MOE_UNQUANTIZED_CONFIG
@@ -730,6 +731,7 @@ class UnfusedOAITritonExperts(BaseOAITritonExperts):
         if quant_config is None:
             quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
 
+        global_topk_ids = topk_ids
         if expert_map is not None:
             topk_ids = expert_map[topk_ids]
 
@@ -804,9 +806,9 @@ class UnfusedOAITritonExperts(BaseOAITritonExperts):
                 lora_context,
                 y=act_input,
                 x=hidden_states,
-                topk_ids=topk_ids,
+                topk_ids=global_topk_ids,
                 topk_weights=topk_weights,
-                expert_map=None,  # already applied above
+                expert_map=expert_map,
                 w1=w1,
                 w2=w2,
                 num_tokens=M,

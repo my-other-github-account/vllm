@@ -932,6 +932,7 @@ class BatchedMarlinExperts(MarlinExpertsBase):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        lora_context: "MoELoRAContext | None" = None,
     ):
         assert expert_tokens_meta is not None, "Num valid tokens per batch is required"
         return batched_fused_marlin_moe(
