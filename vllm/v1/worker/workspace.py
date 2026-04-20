@@ -27,6 +27,9 @@ _GiB = 1024**3
 # Global workspace manager instance
 _manager: "WorkspaceManager | None" = None
 
+# each pool reuses a single backing allocation per ubatch
+# keep communication in a separate pool so it cannot alias with default
+# workspace tensors that may still be live while DCP collectives run.
 DEFAULT_WORKSPACE_POOL = "default"
 COMM_WORKSPACE_POOL = "comm"
 
