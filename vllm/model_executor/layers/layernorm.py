@@ -62,9 +62,10 @@ def fused_add_rms_norm(
     from vllm import _custom_ops as ops
 
     if envs.VLLM_BATCH_INVARIANT:
+        input_tensor = x + residual
         return rms_norm_batch_invariant(
-            x + residual, weight, variance_epsilon
-        ), x + residual
+            input_tensor, weight, variance_epsilon
+        ), input_tensor
     ops.fused_add_rms_norm(
         x,
         residual,
