@@ -491,22 +491,12 @@ class VllmConfig:
         ):
             return False
 
-        # TODO: ngram / ngram_gpu are not supported by the v2 model runner yet
-        if self.speculative_config is not None and (
-            self.speculative_config.method in ("ngram", "ngram_gpu")
-        ):
+        unsupported = self._get_v2_model_runner_unsupported_features()
+        if unsupported:
             logger.warning_once(
-                "Model runner v2 does not support ngram or ngram_gpu speculative "
-                "decoding; using the v1 model runner instead."
-            )
-            return False
-
-        if self.reasoning_config is not None:
-            # TODO: add reasoning budget enforcement to ModelRunnerV2.
-            logger.warning_once(
-                "Model runner v2 does not yet support reasoning budget "
-                "enforcement; using the v1 model runner instead when "
-                "reasoning parsing is configured."
+                "Model runner v2 does not yet support %s; using the v1 model "
+                "runner instead.",
+                ", ".join(unsupported),
             )
             return False
 
@@ -1837,34 +1827,60 @@ class VllmConfig:
             f"kernel_config={self.kernel_config!r}"
         )
 
-    def _validate_v2_model_runner(self) -> None:
-        """Check for features not yet supported by the V2 model runner."""
+    def _get_v2_model_runner_unsupported_features(self) -> list[str]:
+        """Collect features not yet supported by the V2 model runner."""
         unsupported: list[str] = []
+        model_config = self.model_config
+        speculative_config = self.speculative_config
 
-        if self.model_config is not None and self.model_config.has_inner_state:
+        if model_config is not None and model_config.has_inner_state:
             unsupported.append("hybrid/mamba models")
 
         if self.parallel_config.prefill_context_parallel_size > 1:
             unsupported.append("prefill context parallelism")
 
         if (
-            self.speculative_config is not None
-            and self.speculative_config.method not in ("eagle", "eagle3", "mtp")
+            self.compilation_config.pass_config.enable_sp
+            and self.parallel_config.tensor_parallel_size > 1
         ):
-            unsupported.append(f"speculative method '{self.speculative_config.method}'")
+            unsupported.append("sequence parallelism")
+
+        if speculative_config is not None:
+            # TODO: ngram / ngram_gpu are not supported by the v2 model runner yet
+            if speculative_config.method in ("ngram", "ngram_gpu"):
+                unsupported.append("ngram/ngram_gpu speculative decoding")
+            elif speculative_config.method not in ("eagle", "eagle3", "mtp"):
+                unsupported.append(f"speculative method '{speculative_config.method}'")
+
+            if (
+                speculative_config.method == "eagle3"
+                and self.parallel_config.pipeline_parallel_size > 1
+            ):
+                unsupported.append("EAGLE3 with pipeline parallelism")
+
+        if self.reasoning_config is not None:
+            # TODO: add reasoning budget enforcement to ModelRunnerV2.
+            unsupported.append("reasoning budget enforcement")
 
         if self.parallel_config.enable_dbo:
             unsupported.append("dual batch overlap")
 
-        if (
-            self.model_config is not None
-            and self.model_config.enable_return_routed_experts
-        ):
+        if model_config is not None and model_config.enable_return_routed_experts:
             # Will be added by https://github.com/vllm-project/vllm/pull/38163
             unsupported.append("routed experts capture")
 
-        if self.model_config is not None and self.model_config.logits_processors:
+        if model_config is not None and model_config.logits_processors:
             unsupported.append("custom logits processors")
+
+        if model_config is not None and model_config.enable_prompt_embeds:
+            unsupported.append("prompt embeds")
+
+        if (
+            model_config is not None
+            and model_config.runner_type == "generate"
+            and model_config.logprobs_mode in ("raw_logits", "processed_logits")
+        ):
+            unsupported.append(f"logprobs mode '{model_config.logprobs_mode}'")
 
         if self.cache_config.kv_sharing_fast_prefill:
             # Will be added by https://github.com/vllm-project/vllm/pull/35045
@@ -1874,6 +1890,11 @@ class VllmConfig:
             # Will be added by https://github.com/vllm-project/vllm/pull/38390
             unsupported.append("EC transfer")
 
+        return unsupported
+
+    def _validate_v2_model_runner(self) -> None:
+        """Check for features not yet supported by the V2 model runner."""
+        unsupported = self._get_v2_model_runner_unsupported_features()
         if unsupported:
             raise ValueError(
                 "VLLM_USE_V2_MODEL_RUNNER does not yet support: "
