@@ -428,29 +428,32 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.use_sparse = use_sparse
 
         vllm_config = get_current_vllm_config_or_none()
+        dcp_world_size = (
+            1
+            if vllm_config is None
+            else vllm_config.parallel_config.decode_context_parallel_size
+        )
         # reserve collective workspace for dcp
-        if vllm_config is not None:
-            dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
-            if dcp_world_size > 1:
-                speculative_config = vllm_config.speculative_config
-                num_spec_tokens = (
-                    speculative_config.num_speculative_tokens
-                    if speculative_config is not None
-                    else 0
-                )
-                reserve_cp_collective_workspace(
-                    max_num_tokens=vllm_config.scheduler_config.max_num_seqs
-                    * (1 + num_spec_tokens),
-                    total_heads=self.num_heads * dcp_world_size,
-                    gather_head_dim=self.kv_lora_rank + self.qk_rope_head_dim,
-                    reduce_scatter_head_dim=self.kv_lora_rank,
-                    cp_world_size=dcp_world_size,
-                    dtype=vllm_config.model_config.dtype,
-                    reserve_a2a=(vllm_config.parallel_config.dcp_comm_backend == "a2a"),
-                )
+        if dcp_world_size > 1:
+            speculative_config = vllm_config.speculative_config
+            num_spec_tokens = (
+                speculative_config.num_speculative_tokens
+                if speculative_config is not None
+                else 0
+            )
+            reserve_cp_collective_workspace(
+                max_num_tokens=vllm_config.scheduler_config.max_num_seqs
+                * (1 + num_spec_tokens),
+                total_heads=self.num_heads * dcp_world_size,
+                gather_head_dim=self.kv_lora_rank + self.qk_rope_head_dim,
+                reduce_scatter_head_dim=self.kv_lora_rank,
+                cp_world_size=dcp_world_size,
+                dtype=vllm_config.model_config.dtype,
+                reserve_a2a=(vllm_config.parallel_config.dcp_comm_backend == "a2a"),
+            )
         self.dcp_a2a = (
-            vllm_config is not None
-            and vllm_config.parallel_config.decode_context_parallel_size > 1
+            dcp_world_size > 1
+            and vllm_config is not None
             and vllm_config.parallel_config.dcp_comm_backend == "a2a"
         )
 
