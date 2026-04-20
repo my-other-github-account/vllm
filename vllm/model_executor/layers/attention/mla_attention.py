@@ -2642,8 +2642,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             ]
             assert toks * dcp_world_size <= cur_allgather_workspace.shape[0]
             cur_allgather_kvcache = cur_allgather_workspace[: toks * dcp_world_size]
-            dcp_group = get_dcp_group()
-            dcp_group.all_gather_into_tensor(
+            get_dcp_group().all_gather_into_tensor(
                 cur_allgather_kvcache, local_gathered_kvcache
             )
             assert (
