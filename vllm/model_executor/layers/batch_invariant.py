@@ -988,13 +988,21 @@ def enable_batch_invariant_mode():
 
 
 def override_envs_for_invariance(
-    attention_backend: AttentionBackendEnum | None,
+    attention_backend: AttentionBackendEnum,
 ):
-    decode_invariant_backends = [
+    # batch invariance currently has two tiers of backend support:
+    # 1. compatible with batch-invariant execution within a fixed execution path.
+    # 2. also invariant across prefill and decode paths.
+    #
+    # for MLA, attention_config.backend selects the decode backend, while the
+    # prefill backend is chosen separately at runtime
+    # the MLA backends below are compatible with batch-invariant, but are not yet
+    # guaranteed to produce invariant results between prefill and decode paths.
+    prefill_decode_invariant_backends = [
         AttentionBackendEnum.FLASH_ATTN,  # best supported backend
         AttentionBackendEnum.TRITON_ATTN,
     ]
-    supported_backends = decode_invariant_backends + [
+    batch_invariant_compatible_backends = prefill_decode_invariant_backends + [
         # FlashInfer temporarily disabled due to invariant CTA sizes.
         # See FlashInfer issue #2424
         # AttentionBackendEnum.FLASHINFER,
@@ -1005,20 +1013,21 @@ def override_envs_for_invariance(
         # AttentionBackendEnum.FLEX_ATTENTION,  # IMA issue
         # AttentionBackendEnum.FLASHINFER_MLA,  # PR #28967
     ]
-    if attention_backend not in supported_backends:
-        supported_names = [b.name for b in supported_backends]
-        backend_name = attention_backend.name if attention_backend else None
+    if attention_backend not in batch_invariant_compatible_backends:
+        supported_names = [b.name for b in batch_invariant_compatible_backends]
         error = (
             "VLLM batch_invariant mode requires an attention backend in "
-            f"{supported_names}, but got '{backend_name}'. "
+            f"{supported_names}, but got '{attention_backend.name}'. "
             "Please use --attention-backend or attention_config to set "
             "one of the supported backends before enabling batch_invariant."
         )
         raise RuntimeError(error)
-    if attention_backend not in decode_invariant_backends:
+    if attention_backend not in prefill_decode_invariant_backends:
         warning = (
-            "You are using a non-decode-invariant form of batch invariance. "
-            "This will not be invariant between prefill and decode."
+            "Batch invariance is enabled with backend "
+            f"'{attention_backend.name}'. vLLM will enforce batch-invariant execution "
+            "within a given path, but does not yet guarantee invariance "
+            "between prefill and decode paths for this backend."
         )
         logger.warning_once(warning, scope="local")
     os.environ["VLLM_ALLREDUCE_USE_SYMM_MEM"] = "0"
@@ -1042,7 +1051,7 @@ def override_envs_for_invariance(
 
 
 def init_batch_invariance(
-    attention_backend: AttentionBackendEnum | None,
+    attention_backend: AttentionBackendEnum,
 ):
     # this will hit all the csrc overrides as well
     if envs.VLLM_BATCH_INVARIANT:
