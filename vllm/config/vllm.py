@@ -1846,9 +1846,6 @@ class VllmConfig:
         if self.parallel_config.prefill_context_parallel_size > 1:
             unsupported.append("prefill context parallelism")
 
-        if not HAS_TRITON:
-            unsupported.append("Triton is unavailable")
-
         if (
             self.compilation_config.pass_config.enable_sp
             and self.parallel_config.tensor_parallel_size > 1
@@ -1912,6 +1909,9 @@ class VllmConfig:
 
     def _validate_v2_model_runner(self) -> None:
         """Check for features not yet supported by the V2 model runner."""
+        if not HAS_TRITON:
+            raise ValueError("VLLM_USE_V2_MODEL_RUNNER requires Triton.")
+
         unsupported = self._get_v2_model_runner_unsupported_features()
         if unsupported:
             raise ValueError(
