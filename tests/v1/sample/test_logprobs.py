@@ -1167,14 +1167,6 @@ def test_prompt_logprobs_with_chunking_and_preemption(monkeypatch, request):
     This test ensures that the num_prompt_logprobs tracking persists
     across preemptions and prefill chunks.
     """
-    import vllm.envs as envs
-
-    # TODO: Remove this fallback once ModelRunnerV2 supports prompt logprobs
-    # under chunked prefill + preemption (tracked in PR #39937).
-    envs.disable_envs_cache()
-    request.addfinalizer(envs.disable_envs_cache)
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
-
     # Create prompts that will trigger chunking and preemption
     prompts = [
         "The following numbers of the sequence "
