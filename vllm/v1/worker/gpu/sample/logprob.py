@@ -119,14 +119,21 @@ def compute_topk_logprobs(
         valid_mask = torch.zeros_like(logprob_token_ids, dtype=torch.bool)
         valid_mask[:, 0] = True
         valid_mask[:, 1 : num_logprobs + 1] = True  # topk valid by default
+        row_indices: list[int] = []
+        col_indices: list[int] = []
+        token_values: list[int] = []
         for row_idx, token_ids in logprob_token_ids_by_row.items():
             num_requested = len(token_ids)
-            # override topk with requested tokens
-            logprob_token_ids[row_idx, 1 : num_requested + 1] = torch.tensor(
-                token_ids, dtype=sampled_token_ids.dtype, device=logits.device
-            )
+            row_indices.extend([row_idx] * num_requested)
+            col_indices.extend(range(1, num_requested + 1))
+            token_values.extend(token_ids)
             valid_mask[row_idx, 1 : num_requested + 1] = True
             valid_mask[row_idx, num_requested + 1 :] = False
+        if token_values:
+            logprob_token_ids[
+                torch.tensor(row_indices, dtype=torch.long, device=logits.device),
+                torch.tensor(col_indices, dtype=torch.long, device=logits.device),
+            ] = sampled_token_ids.new_tensor(token_values)
 
     # NOTE(woosuk): Here, to save GPU memory, we do not materialize the full
     # logprobs tensor. Instead, we only compute and return the logprobs of
