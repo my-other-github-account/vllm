@@ -97,6 +97,7 @@ def compute_topk_logprobs(
     num_logprobs: int,
     sampled_token_ids: torch.Tensor,
     cu_num_logits: list[int] | None = None,
+    logprob_token_ids_by_row: dict[int, list[int]] | None = None,
 ) -> LogprobsTensors:
     assert num_logprobs >= 0
     batch_size, vocab_size = logits.shape
@@ -105,10 +106,34 @@ def compute_topk_logprobs(
         topk_indices = torch.topk(logits, num_logprobs, dim=-1).indices
         logprob_token_ids = torch.cat((logprob_token_ids, topk_indices), dim=1)
 
+    if logprob_token_ids_by_row:
+        max_num_logprobs = max(
+            len(token_ids) for token_ids in logprob_token_ids_by_row.values()
+        )
+        # in case when requested tokens are more than topk, padded
+        if max_num_logprobs > num_logprobs:
+            padded = sampled_token_ids.new_zeros((batch_size, max_num_logprobs + 1))
+            padded[:, : num_logprobs + 1] = logprob_token_ids
+            logprob_token_ids = padded
+
+        valid_mask = torch.zeros_like(logprob_token_ids, dtype=torch.bool)
+        valid_mask[:, 0] = True
+        valid_mask[:, 1 : num_logprobs + 1] = True  # topk valid by default
+        for row_idx, token_ids in logprob_token_ids_by_row.items():
+            num_requested = len(token_ids)
+            # override topk with requested tokens
+            logprob_token_ids[row_idx, 1 : num_requested + 1] = torch.tensor(
+                token_ids, dtype=sampled_token_ids.dtype, device=logits.device
+            )
+            valid_mask[row_idx, 1 : num_requested + 1] = True
+            valid_mask[row_idx, num_requested + 1 :] = False
+
     # NOTE(woosuk): Here, to save GPU memory, we do not materialize the full
     # logprobs tensor. Instead, we only compute and return the logprobs of
     # the topk + 1 tokens.
     logprobs = compute_token_logprobs(logits, logprob_token_ids)
+    if logprob_token_ids_by_row:
+        logprobs = logprobs.masked_fill(~valid_mask, float("-inf"))
     token_ranks = torch.empty(batch_size, dtype=torch.int64, device=logits.device)
     _ranks_kernel[(batch_size,)](
         token_ranks,

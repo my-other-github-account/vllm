@@ -39,6 +39,7 @@ class Sampler:
         self.logit_bias_state = LogitBiasState(max_num_reqs, device)
         self.bad_words_state = BadWordsState(req_states)
         self.num_speculative_tokens = num_speculative_tokens
+        self.logprob_token_ids: dict[int, list[int]] = {}
 
     def add_request(
         self, req_idx: int, prompt_len: int, sampling_params: SamplingParams
@@ -47,6 +48,10 @@ class Sampler:
         self.penalties_state.add_request(req_idx, sampling_params)
         self.logit_bias_state.add_request(req_idx, prompt_len, sampling_params)
         self.bad_words_state.add_request(req_idx, sampling_params)
+        if sampling_params.logprob_token_ids:
+            self.logprob_token_ids[req_idx] = sampling_params.logprob_token_ids
+        else:
+            self.logprob_token_ids.pop(req_idx, None)
 
     def apply_staged_writes(self) -> None:
         self.sampling_states.apply_staged_writes()
@@ -78,14 +83,42 @@ class Sampler:
             expanded_local_pos,
         )
 
+        # case when speculative decoding, logits.shape[0] != idx_mapping_np.shape[0]
+        # so one request will be expanded to multiple rows in logits
+        expanded_logits = logits.shape[0] != idx_mapping_np.shape[0]
+        cu_num_logits = cu_num_logits_np.tolist() if expanded_logits else None
+        logits_for_logprobs = (
+            processed_logits if self.logprobs_mode == "processed_logprobs" else logits
+        )
         max_num_logprobs = self.sampling_states.max_num_logprobs(idx_mapping_np)
+        logprob_token_ids_by_row = None
+        if self.logprob_token_ids:
+            if expanded_logits:
+                # converting from {req_idx: token_ids} to {row_idx: token_ids}
+                logprob_token_ids_by_row = {}
+                for batch_idx, req_idx in enumerate(idx_mapping_np):
+                    token_ids = self.logprob_token_ids.get(int(req_idx))
+                    if token_ids is None:
+                        continue
+                    start = int(cu_num_logits_np[batch_idx])
+                    end = int(cu_num_logits_np[batch_idx + 1])
+                    for row_idx in range(start, end):
+                        logprob_token_ids_by_row[row_idx] = token_ids
+            else:
+                # one request <-> one row in logits
+                logprob_token_ids_by_row = {
+                    row_idx: token_ids
+                    for row_idx, req_idx in enumerate(idx_mapping_np)
+                    if (token_ids := self.logprob_token_ids.get(int(req_idx)))
+                    is not None
+                }
         if max_num_logprobs != NO_LOGPROBS:
-            if self.logprobs_mode == "processed_logprobs":
-                logits = processed_logits
-            expanded_logits = logits.shape[0] != idx_mapping_np.shape[0]
-            cu_num_logits = cu_num_logits_np.tolist() if expanded_logits else None
             logprobs_tensors = compute_topk_logprobs(
-                logits, max_num_logprobs, sampled, cu_num_logits
+                logits_for_logprobs,
+                max_num_logprobs,
+                sampled,
+                cu_num_logits,
+                logprob_token_ids_by_row,
             )
         else:
             logprobs_tensors = None
