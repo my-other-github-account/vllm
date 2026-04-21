@@ -24,6 +24,7 @@ from pydantic import ConfigDict, Field, model_validator
 import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
 from vllm.transformers_utils.runai_utils import is_runai_obj_uri
+from vllm.triton_utils import HAS_TRITON
 from vllm.utils import random_uuid
 from vllm.utils.hashing import safe_hash
 
@@ -489,6 +490,12 @@ class VllmConfig:
             self.model_config is None
             or self.model_config.model not in DEFAULT_V2_MODEL_RUNNER_MODELS
         ):
+            return False
+
+        if not HAS_TRITON:
+            logger.warning_once(
+                "Model runner v2 requires Triton; using the v1 model runner instead."
+            )
             return False
 
         unsupported = self._get_v2_model_runner_unsupported_features()
@@ -1838,6 +1845,9 @@ class VllmConfig:
 
         if self.parallel_config.prefill_context_parallel_size > 1:
             unsupported.append("prefill context parallelism")
+
+        if not HAS_TRITON:
+            unsupported.append("Triton is unavailable")
 
         if (
             self.compilation_config.pass_config.enable_sp
