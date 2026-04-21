@@ -83,16 +83,19 @@ class Sampler:
             expanded_local_pos,
         )
 
-        # case when speculative decoding, logits.shape[0] != idx_mapping_np.shape[0]
-        # so one request will be expanded to multiple rows in logits
-        expanded_logits = logits.shape[0] != idx_mapping_np.shape[0]
-        cu_num_logits = cu_num_logits_np.tolist() if expanded_logits else None
-        logits_for_logprobs = (
-            processed_logits if self.logprobs_mode == "processed_logprobs" else logits
-        )
         max_num_logprobs = self.sampling_states.max_num_logprobs(idx_mapping_np)
-        logprob_token_ids_by_row = None
+        has_logprob_token_ids = False
         if self.logprob_token_ids:
+            has_logprob_token_ids = any(
+                int(req_idx) in self.logprob_token_ids for req_idx in idx_mapping_np
+            )
+        logprob_token_ids_by_row = None
+        expanded_logits = False
+        if max_num_logprobs != NO_LOGPROBS or has_logprob_token_ids:
+            # case when speculative decoding, logits.shape[0] != idx_mapping_np.shape[0]
+            # so one request will be expanded to multiple rows in logits
+            expanded_logits = logits.shape[0] != idx_mapping_np.shape[0]
+        if has_logprob_token_ids:
             if expanded_logits:
                 # converting from {req_idx: token_ids} to {row_idx: token_ids}
                 logprob_token_ids_by_row = {}
@@ -114,6 +117,12 @@ class Sampler:
                 }
         num_logprobs = max_num_logprobs if max_num_logprobs != NO_LOGPROBS else 0
         if max_num_logprobs != NO_LOGPROBS or logprob_token_ids_by_row:
+            cu_num_logits = cu_num_logits_np.tolist() if expanded_logits else None
+            logits_for_logprobs = (
+                processed_logits
+                if self.logprobs_mode == "processed_logprobs"
+                else logits
+            )
             logprobs_tensors = compute_topk_logprobs(
                 logits_for_logprobs,
                 num_logprobs,
