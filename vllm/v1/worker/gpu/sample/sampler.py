@@ -112,10 +112,11 @@ class Sampler:
                     if (token_ids := self.logprob_token_ids.get(int(req_idx)))
                     is not None
                 }
-        if max_num_logprobs != NO_LOGPROBS:
+        num_logprobs = max_num_logprobs if max_num_logprobs != NO_LOGPROBS else 0
+        if max_num_logprobs != NO_LOGPROBS or logprob_token_ids_by_row:
             logprobs_tensors = compute_topk_logprobs(
                 logits_for_logprobs,
-                max_num_logprobs,
+                num_logprobs,
                 sampled,
                 cu_num_logits,
                 logprob_token_ids_by_row,
