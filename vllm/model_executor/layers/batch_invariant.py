@@ -1053,6 +1053,7 @@ def override_envs_for_invariance(
 def init_batch_invariance(
     attention_backend: AttentionBackendEnum,
 ):
+    assert attention_backend is not None
     # this will hit all the csrc overrides as well
     if envs.VLLM_BATCH_INVARIANT:
         override_envs_for_invariance(attention_backend)
