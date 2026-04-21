@@ -1869,7 +1869,15 @@ class VllmConfig:
             # Will be added by https://github.com/vllm-project/vllm/pull/38163
             unsupported.append("routed experts capture")
 
-        if model_config is not None and model_config.logits_processors:
+        has_logitsproc_plugins = False
+        if model_config is not None:
+            from importlib.metadata import entry_points
+
+            has_logitsproc_plugins = bool(entry_points(group="vllm.logits_processors"))
+
+        if model_config is not None and (
+            model_config.logits_processors or has_logitsproc_plugins
+        ):
             unsupported.append("custom logits processors")
 
         if model_config is not None and model_config.enable_prompt_embeds:
