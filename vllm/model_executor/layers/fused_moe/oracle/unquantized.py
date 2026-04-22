@@ -163,11 +163,6 @@ def select_unquantized_moe_backend(
     if current_platform.is_out_of_tree():
         return UnquantizedMoeBackend.OOT, None
 
-    if moe_config.is_lora_enabled:
-        return UnquantizedMoeBackend.TRITON, backend_to_kernel_cls(
-            UnquantizedMoeBackend.TRITON
-        )
-
     # NOTE: the kernels are selected in the following order.
     AVAILABLE_BACKENDS = _get_priority_backends(moe_config)
 
@@ -214,8 +209,6 @@ def select_unquantized_moe_backend(
             return backend, k_cls
         raise ValueError(_make_log_unsupported(backend, reason))
 
-    require_lora = moe_config.is_lora_enabled
-
     runner_backend = moe_config.moe_backend
     if runner_backend != "auto":
         requested_backend = map_unquantized_backend(runner_backend)
@@ -225,20 +218,10 @@ def select_unquantized_moe_backend(
         ):
             requested_backend = UnquantizedMoeBackend.BATCHED_TRITON
 
-        if require_lora:
-            k_cls = backend_to_kernel_cls(requested_backend)
-            if not k_cls.supports_lora():
-                raise ValueError(
-                    f"moe_backend='{runner_backend}' does not support LoRA. "
-                    "Use moe_backend='triton' or moe_backend='auto'."
-                )
         return _return_or_raise(requested_backend, moe_config, activation_format)
 
     # Handle explicit FlashInfer FP16 configuration.
-    # When LoRA is enabled, FlashInfer backends don't support it — skip this
-    # block entirely and fall through to the generic auto-selection loop which
-    # will filter by supports_lora().
-    if envs.is_set("VLLM_USE_FLASHINFER_MOE_FP16") and not require_lora:
+    if envs.is_set("VLLM_USE_FLASHINFER_MOE_FP16"):
         if not envs.VLLM_USE_FLASHINFER_MOE_FP16:
             if UnquantizedMoeBackend.FLASHINFER_TRTLLM in AVAILABLE_BACKENDS:
                 AVAILABLE_BACKENDS.remove(UnquantizedMoeBackend.FLASHINFER_TRTLLM)
@@ -289,27 +272,10 @@ def select_unquantized_moe_backend(
                 AVAILABLE_BACKENDS.remove(UnquantizedMoeBackend.AITER)
         else:
             backend = UnquantizedMoeBackend.AITER
-            if require_lora:
-                k_cls = backend_to_kernel_cls(backend)
-                if not k_cls.supports_lora():
-                    logger.warning_once(
-                        "VLLM_ROCM_USE_AITER_MOE=1 but AiterExperts does not "
-                        "support LoRA; falling back to generic backend selection.",
-                        scope="local",
-                    )
-                else:
-                    return _return_or_raise(backend, moe_config, activation_format)
-            else:
-                return _return_or_raise(backend, moe_config, activation_format)
+            return _return_or_raise(backend, moe_config, activation_format)
 
     for backend in AVAILABLE_BACKENDS:
         k_cls = backend_to_kernel_cls(backend)
-        if require_lora and not k_cls.supports_lora():
-            logger.debug_once(
-                f"Skipping MoE backend {backend.value}: does not support LoRA.",
-                scope="local",
-            )
-            continue
         supported, reason = k_cls.is_supported_config(
             k_cls, moe_config, None, None, activation_format
         )
@@ -320,8 +286,7 @@ def select_unquantized_moe_backend(
         logger.debug_once(_make_log_unsupported(backend, reason), scope="local")
 
     raise NotImplementedError(
-        "No Unquantized MoE backend supports the deployment configuration"
-        + (" with LoRA enabled." if require_lora else ".")
+        "No Unquantized MoE backend supports the deployment configuration."
     )
 
 

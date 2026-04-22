@@ -583,6 +583,8 @@ class FusedMoEExperts(ABC):
             return False, _make_reason(f"{activation_format.value} activation format")
         elif envs.VLLM_BATCH_INVARIANT and not cls._supports_batch_invariance():
             return False, _make_reason("batch invariance")
+        elif moe_config.is_lora_enabled and not cls.supports_lora():
+            return False, _make_reason("LoRA")
         return True, None
 
     @staticmethod
