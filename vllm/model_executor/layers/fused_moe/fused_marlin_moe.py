@@ -727,7 +727,7 @@ class MarlinExperts(MarlinExpertsBase):
         assert self.w2_scale is not None
 
         if lora_context is None:
-            return fused_marlin_moe(
+            fused_marlin_moe(
                 hidden_states=hidden_states,
                 w1=w1,
                 w2=w2,
