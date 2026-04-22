@@ -758,6 +758,7 @@ class MarlinExperts(MarlinExpertsBase):
                 is_k_full=self.is_k_full,
                 input_dtype=self.input_dtype,
             )
+            return
 
         # LoRA path: wrap activation_func and moe_sum to inject LoRA at the
         # two natural injection points.
@@ -765,6 +766,7 @@ class MarlinExperts(MarlinExpertsBase):
         # Marlin uses moe_align_block_size (same as TritonExperts) so
         # intermediate_cache1 is indexed by flat (token, expert) pair index,
         # which is compatible with add_lora_fused_moe's scatter mechanism.
+
         ctx = lora_context
         M = hidden_states.size(0)
         top_k_num = topk_ids.size(1)
@@ -777,6 +779,7 @@ class MarlinExperts(MarlinExpertsBase):
         ) -> None:
             # act_input  = intermediate_cache1 (M*topk, 2N for gated)
             # act_output = intermediate_cache2 (M*topk, N)
+
             (
                 sorted_token_ids_lora,
                 expert_ids_lora,
