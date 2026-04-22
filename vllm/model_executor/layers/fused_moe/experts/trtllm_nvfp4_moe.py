@@ -3,7 +3,6 @@
 
 from typing import TYPE_CHECKING
 
-import flashinfer
 import torch
 
 if TYPE_CHECKING:
@@ -194,6 +193,8 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
         apply_router_weight_on_input: bool,
         lora_context: "MoELoRAContext | None" = None,
     ):
+        import flashinfer
+
         assert activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
         assert a1q_scale is not None
         assert self.quant_config.w1_scale is not None
@@ -312,6 +313,8 @@ class TrtLlmNvFp4ExpertsMonolithic(
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
     ) -> torch.Tensor:
+        import flashinfer
+
         assert activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
         assert a1q_scale is not None
         assert self.quant_config.w1_scale is not None
