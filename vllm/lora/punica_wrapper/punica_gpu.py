@@ -491,11 +491,11 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         import functools
 
         from vllm.lora.layers.utils import try_get_optimal_moe_lora_config
-        from vllm.lora.ops.triton_ops.utils import get_lora_op_configs
-        from vllm.model_executor.layers.fused_moe.config import _get_config_dtype_str
-        from vllm.model_executor.layers.fused_moe.lora_context import (
+        from vllm.lora.ops.triton_ops.utils import (
             _normalize_lora_config_keys,
+            get_lora_op_configs,
         )
+        from vllm.model_executor.layers.fused_moe.config import _get_config_dtype_str
 
         config_dtype = _get_config_dtype_str(
             dtype=x.dtype,
@@ -621,11 +621,11 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         import functools
 
         from vllm.lora.layers.utils import try_get_optimal_moe_lora_config
-        from vllm.lora.ops.triton_ops.utils import get_lora_op_configs
-        from vllm.model_executor.layers.fused_moe.config import _get_config_dtype_str
-        from vllm.model_executor.layers.fused_moe.lora_context import (
+        from vllm.lora.ops.triton_ops.utils import (
             _normalize_lora_config_keys,
+            get_lora_op_configs,
         )
+        from vllm.model_executor.layers.fused_moe.config import _get_config_dtype_str
 
         config_dtype = _get_config_dtype_str(
             dtype=x.dtype,
