@@ -257,16 +257,6 @@ class FusedMoEPrepareAndFinalizeModular(FusedMoEPrepareAndFinalize):
     described above for the Modular case.
     """
 
-    @staticmethod
-    def supports_lora() -> bool:
-        """Return True if this prepare/finalize impl can propagate LoRA context.
-
-        Non-EP implementations support LoRA by default.  EP-aware
-        implementations must override this to True once they can dispatch
-        lora_ids alongside hidden states in their all2all call (Task 2).
-        """
-        return True
-
     @abstractmethod
     def prepare(
         self,
