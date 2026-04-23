@@ -480,8 +480,6 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         num_slices: int,
         fully_sharded: bool,
         use_tuned_config: bool,
-        *,
-        block_shape: list[int] | None = None,
     ) -> tuple[
         torch.Tensor | None,
         torch.Tensor | None,
@@ -533,7 +531,6 @@ class PunicaWrapperGPU(PunicaWrapperBase):
                 top_k=top_k,
                 dtype=config_dtype,
                 M=num_tokens,
-                block_shape=block_shape,
             )
             shrink_config = get_config(op_type="fused_moe_lora_w13_shrink")
             expand_config = get_config(op_type="fused_moe_lora_w13_expand")
@@ -615,8 +612,6 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         fully_sharded: bool,
         tp_rank: int,
         use_tuned_config: bool,
-        *,
-        block_shape: list[int] | None = None,
     ) -> None:
         import functools
 
@@ -663,7 +658,6 @@ class PunicaWrapperGPU(PunicaWrapperBase):
                 top_k=top_k,
                 dtype=config_dtype,
                 M=num_tokens,
-                block_shape=block_shape,
             )
             shrink_config = get_config(op_type="fused_moe_lora_w2_shrink")
             expand_config = get_config(op_type="fused_moe_lora_w2_expand")

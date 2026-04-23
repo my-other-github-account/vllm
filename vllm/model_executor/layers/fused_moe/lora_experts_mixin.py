@@ -19,8 +19,8 @@ class LoRAExpertsMixin:
     - Provides apply_w13_lora / apply_w2_lora helpers that dispatch to
       the PunicaWrapper kernels.
 
-    Mixin callers rely on self.block_shape from FusedMoEExperts, so this
-    must be mixed into a FusedMoEExperts subclass.
+    The helper methods are pure functions of their inputs; all required
+    state is on lora_context or passed as arguments.
     """
 
     _lora_context: MoELoRAContext | None = None
@@ -70,7 +70,6 @@ class LoRAExpertsMixin:
             lora_context.w13_num_slices,
             lora_context.fully_sharded,
             lora_context.use_tuned_config,
-            block_shape=self.block_shape,
         )
 
     def apply_w2_lora(
@@ -109,5 +108,4 @@ class LoRAExpertsMixin:
             lora_context.fully_sharded,
             lora_context.tp_rank,
             lora_context.use_tuned_config,
-            block_shape=self.block_shape,
         )

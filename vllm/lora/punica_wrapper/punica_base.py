@@ -514,8 +514,6 @@ class PunicaWrapperBase(PunicaWrapperABC):
         num_slices: int,
         fully_sharded: bool,
         use_tuned_config: bool,
-        *,
-        block_shape: list[int] | None = None,
     ) -> tuple[
         torch.Tensor | None,
         torch.Tensor | None,
@@ -551,8 +549,6 @@ class PunicaWrapperBase(PunicaWrapperABC):
         fully_sharded: bool,
         tp_rank: int,
         use_tuned_config: bool,
-        *,
-        block_shape: list[int] | None = None,
     ) -> None:
         """Apply w2 LoRA to y (intermediate_cache3) in-place before moe_sum.
 
