@@ -762,23 +762,33 @@ class LoRAModelManager:
             assert gate_up_proj_lora is not None
             assert down_proj_lora is not None
             if self._is_3d_moe_model:
-                num_experts = module.w13_lora_a_stacked[0].shape[1]
+                local_num_experts = module.w13_lora_a_stacked[0].shape[1]
+                # The checkpoint holds weights for all global experts, but
+                # each EP rank owns only local_num_experts. Reshape against
+                # the adapter's actual expert count, then slice this rank's
+                # owned expert range before it gets copied into the local
+                # stacked buffer. For non-EP (local == global) this is a
+                # no-op slice.
+                global_num_experts = module.base_layer.global_num_experts
+                ep_rank = module.base_layer.ep_rank
+                expert_start = ep_rank * local_num_experts
+                expert_end = expert_start + local_num_experts
 
                 # (num_experts,rank,input_size)
                 gate_up_proj_lora.lora_a = gate_up_proj_lora.lora_a.reshape(
-                    num_experts, -1, gate_up_proj_lora.lora_a.shape[-1]
-                )
+                    global_num_experts, -1, gate_up_proj_lora.lora_a.shape[-1]
+                )[expert_start:expert_end].contiguous()
                 down_proj_lora.lora_a = down_proj_lora.lora_a.reshape(
-                    num_experts, -1, down_proj_lora.lora_a.shape[-1]
-                )
+                    global_num_experts, -1, down_proj_lora.lora_a.shape[-1]
+                )[expert_start:expert_end].contiguous()
 
                 # (output_size,rank,num_experts)
                 gate_up_proj_lora.lora_b = gate_up_proj_lora.lora_b.reshape(
-                    gate_up_proj_lora.lora_b.shape[0], -1, num_experts
-                )
+                    gate_up_proj_lora.lora_b.shape[0], -1, global_num_experts
+                )[..., expert_start:expert_end]
                 down_proj_lora.lora_b = down_proj_lora.lora_b.reshape(
-                    down_proj_lora.lora_b.shape[0], -1, num_experts
-                )
+                    down_proj_lora.lora_b.shape[0], -1, global_num_experts
+                )[..., expert_start:expert_end]
 
                 # (num_experts,output_size,rank)
                 gate_up_proj_lora.lora_b = gate_up_proj_lora.lora_b.permute(

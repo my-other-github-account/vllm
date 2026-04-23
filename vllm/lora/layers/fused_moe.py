@@ -34,9 +34,13 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         super().__init__()
         self.base_layer = base_layer
 
-        assert not self.base_layer.use_ep, (
-            "EP support for Fused MoE LoRA is not implemented yet."
-        )
+        if self.base_layer.use_ep:
+            moe_config = self.base_layer.moe_config
+            all2all_backend = moe_config.moe_parallel_config.all2all_backend
+            assert all2all_backend == "allgather_reducescatter", (
+                "Fused MoE LoRA with EP currently only supports "
+                f"all2all_backend='allgather_reducescatter', got '{all2all_backend}'."
+            )
         assert not self.base_layer.quant_method.is_monolithic, (
             "Monolithic kernels are not supported for Fused MoE LoRA."
         )
@@ -72,6 +76,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             "and consume self._lora_context in apply()."
         )
         self._fused_experts = moe_kernel.fused_experts
+        self._moe_kernel = moe_kernel
         self.base_layer._replace_quant_method(
             FusedMoEModularMethod(self.base_layer.quant_method, moe_kernel)
         )
@@ -156,6 +161,16 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             ),
         )
 
+    def _verify_ep_fs(self, lora_config):
+        # EP and fully_sharded LoRA both partition along the same TP group —
+        # EP on the expert dim, fully_sharded on the LoRA rank dim — with
+        # mutually contradictory assumptions about which rank holds which
+        # expert's rank-shard.
+        assert not (self.base_layer.use_ep and lora_config.fully_sharded_loras), (
+            "Fused MoE LoRA does not support enable_expert_parallel=True "
+            "together with fully_sharded_loras=True. Disable one of them."
+        )
+
     def create_lora_weights(
         self,
         max_loras: int,
@@ -163,6 +178,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         model_config: PretrainedConfig | None = None,
     ) -> None:
         """Initializes lora matrices."""
+
+        self._verify_ep_fs(self, lora_config)
         self.max_loras = lora_config.max_loras
         self.fully_sharded = lora_config.fully_sharded_loras
 
@@ -288,6 +305,24 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
         w1_lora_a, w2_lora_a, w3_lora_a = lora_a
         w1_lora_b, w2_lora_b, w3_lora_b = lora_b
+
+        # Under EP the adapter tensors carry all global experts; slice this
+        # rank's owned range so downstream shapes line up with local buffers.
+        global_num_experts = self.base_layer.global_num_experts
+        ep_rank = self.base_layer.ep_rank
+        if (
+            w1_lora_a.shape[0] == global_num_experts
+            and num_experts != global_num_experts
+        ):
+            expert_start = ep_rank * num_experts
+            expert_end = expert_start + num_experts
+            w1_lora_a = w1_lora_a[expert_start:expert_end]
+            w2_lora_a = w2_lora_a[expert_start:expert_end]
+            w3_lora_a = w3_lora_a[expert_start:expert_end]
+            w1_lora_b = w1_lora_b[expert_start:expert_end]
+            w2_lora_b = w2_lora_b[expert_start:expert_end]
+            w3_lora_b = w3_lora_b[expert_start:expert_end]
+
         assert (
             num_experts
             == w1_lora_a.shape[0]
@@ -332,7 +367,11 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
     def set_mapping(self, punica_wrapper):
         super().set_mapping(punica_wrapper)
-        self._fused_experts.set_lora_context(self._build_lora_context())
+        lora_context = self._build_lora_context()
+        self._fused_experts.set_lora_context(lora_context)
+        prepare_finalize = self._moe_kernel.prepare_finalize
+        if hasattr(prepare_finalize, "set_lora_context"):
+            prepare_finalize.set_lora_context(lora_context)
 
     def forward(self, *args, **kwargs):
         return self.base_layer.forward(*args, **kwargs)
@@ -402,6 +441,7 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         """Initializes lora matrices."""
 
         assert isinstance(model_config, PretrainedConfig)
+        self._verify_ep_fs(self, lora_config)
         self._base_model = model_config.architectures[0]
         self.max_loras = lora_config.max_loras
         self.fully_sharded = lora_config.fully_sharded_loras
