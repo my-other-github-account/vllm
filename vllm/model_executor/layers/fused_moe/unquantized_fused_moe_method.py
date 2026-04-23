@@ -2,12 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING
 
 import torch
-
-if TYPE_CHECKING:
-    from vllm.model_executor.layers.fused_moe.lora_context import MoELoRAContext
 import torch.nn.functional as F
 from torch.nn import Module
 
@@ -261,7 +257,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
-        lora_context: "MoELoRAContext | None" = None,
     ) -> torch.Tensor:
         return self.forward(
             layer=layer,
@@ -269,8 +264,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             shared_experts_input=shared_experts_input,
-            lora_context=lora_context,
-        )  # CustomOp.forward uses *args/**kwargs, lora_context passes through
+        )
 
     def forward_native(
         self,
@@ -279,7 +273,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
-        lora_context: "MoELoRAContext | None" = None,
     ) -> torch.Tensor:
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(
@@ -293,7 +286,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             global_num_experts=layer.global_num_experts,
             expert_map=layer.expert_map,
             shared_experts_input=shared_experts_input,
-            lora_context=lora_context,
         )
 
     def forward_cuda(
@@ -303,7 +295,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
-        lora_context: "MoELoRAContext | None" = None,
     ) -> torch.Tensor:
         return self.forward_native(
             layer,
@@ -311,7 +302,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             topk_weights,
             topk_ids,
             shared_experts_input,
-            lora_context=lora_context,
         )
 
     def apply_monolithic(

@@ -2,12 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-from typing import TYPE_CHECKING
-
 import torch
-
-if TYPE_CHECKING:
-    from vllm.model_executor.layers.fused_moe.lora_context import MoELoRAContext
 from compressed_tensors.quantization import (
     QuantizationArgs,
 )
@@ -250,7 +245,6 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
-        lora_context: "MoELoRAContext | None" = None,
     ) -> torch.Tensor:
         from vllm.model_executor.layers.fused_moe import fused_experts
 

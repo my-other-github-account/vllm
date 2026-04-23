@@ -14,12 +14,19 @@ class LoRAExpertsMixin:
     Mixing this class in:
     - Flips supports_lora() to True so _can_fused_experts_support lets
       LoRA through the gate check.
+    - Stashes a MoELoRAContext on the experts instance via
+      set_lora_context(), which apply() consumes from self._lora_context.
     - Provides apply_w13_lora / apply_w2_lora helpers that dispatch to
       the PunicaWrapper kernels.
 
     Mixin callers rely on self.block_shape from FusedMoEExperts, so this
     must be mixed into a FusedMoEExperts subclass.
     """
+
+    _lora_context: MoELoRAContext | None = None
+
+    def set_lora_context(self, ctx: MoELoRAContext) -> None:
+        self._lora_context = ctx
 
     @staticmethod
     def supports_lora() -> bool:

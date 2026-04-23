@@ -11,13 +11,7 @@ Weights are dequantized on the fly during each forward, we fall back to calling
 is applied on activations via `moe_kernel_quantize_input`.
 """
 
-from typing import TYPE_CHECKING
-
 import torch
-
-if TYPE_CHECKING:
-    from vllm.model_executor.layers.fused_moe.lora_context import MoELoRAContext
-
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
@@ -143,7 +137,6 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
-        lora_context: "MoELoRAContext | None" = None,
     ):
         """
         Apply emulated quantized MoE computation.
@@ -190,5 +183,4 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
             workspace2=workspace2,
             expert_tokens_meta=expert_tokens_meta,
             apply_router_weight_on_input=apply_router_weight_on_input,
-            lora_context=lora_context,
         )

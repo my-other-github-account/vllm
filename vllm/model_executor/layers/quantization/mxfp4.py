@@ -1,12 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING
 
 import torch
-
-if TYPE_CHECKING:
-    from vllm.model_executor.layers.fused_moe.lora_context import MoELoRAContext
 
 from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
@@ -423,7 +419,6 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
-        lora_context: "MoELoRAContext | None" = None,
     ) -> torch.Tensor:
         assert not self.is_monolithic
         assert self.moe_kernel is not None
@@ -438,7 +433,6 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
             expert_map=layer.expert_map,
             shared_experts_input=shared_experts_input,
-            lora_context=lora_context,
         )
 
     def apply_monolithic(

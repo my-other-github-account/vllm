@@ -5,12 +5,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from math import prod
-from typing import TYPE_CHECKING, final
+from typing import final
 
 import torch
-
-if TYPE_CHECKING:
-    from vllm.model_executor.layers.fused_moe.lora_context import MoELoRAContext
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -741,12 +738,10 @@ class FusedMoEExperts(ABC):
 
     @staticmethod
     def supports_lora() -> bool:
-        """Return True if this expert impl natively handles MoELoRAContext.
+        """Return True if this expert impl natively handles LoRA.
 
-        When True, FusedMoEWithLoRA will propagate a MoELoRAContext through
-        FusedMoEKernel.apply() instead of using the legacy decorator injection.
-        Subclasses that inline the LoRA computation inside apply() must override
-        this to return True.
+        LoRA-aware experts should mix in LoRAExpertsMixin, which flips this
+        to True and provides the per-forward LoRA state plumbing.
         """
         return False
 
@@ -912,7 +907,6 @@ class FusedMoEExpertsModular(FusedMoEExperts):
         workspace2: torch.Tensor,
         expert_tokens_meta: ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
-        lora_context: "MoELoRAContext | None" = None,
     ) -> None:
         """
         This function computes the intermediate result of a Mixture of Experts
@@ -1221,7 +1215,6 @@ class FusedMoEKernelModularImpl:
         expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
         expert_tokens_meta: ExpertTokensMetadata | None,
-        lora_context: "MoELoRAContext | None" = None,
     ) -> torch.Tensor:
         _, M_full, N, K, top_k = self.fused_experts.moe_problem_size(
             a1q, w1, w2, topk_ids
@@ -1266,7 +1259,6 @@ class FusedMoEKernelModularImpl:
             workspace2=workspace2,
             expert_tokens_meta=expert_tokens_meta,
             apply_router_weight_on_input=apply_router_weight_on_input,
-            lora_context=lora_context,
         )
 
         return fused_out
@@ -1349,7 +1341,6 @@ class FusedMoEKernelModularImpl:
         expert_map: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
         shared_experts_input: torch.Tensor | None = None,
-        lora_context: "MoELoRAContext | None" = None,
     ) -> torch.Tensor:
         """
         This function computes a Mixture of Experts (MoE) layer using two sets
@@ -1374,8 +1365,6 @@ class FusedMoEKernelModularImpl:
         - shared_experts_input (Optional[torch.Tensor]): Optional separate
           input for shared experts. For latent MoE, this is the original
           hidden_states before latent projection.
-        - lora_context (Optional[MoELoRAContext]): LoRA context to propagate to
-          fused_experts.apply() when the expert backend supports native LoRA.
 
         Returns:
         - torch.Tensor: The output tensor after applying the MoE layer.
@@ -1414,7 +1403,6 @@ class FusedMoEKernelModularImpl:
             expert_map=expert_map,
             apply_router_weight_on_input=apply_router_weight_on_input,
             expert_tokens_meta=expert_tokens_meta,
-            lora_context=lora_context,
         )
 
         return self._finalize(
@@ -1618,7 +1606,6 @@ class FusedMoEKernel:
         expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
         shared_experts_input: torch.Tensor | None = None,
-        lora_context: "MoELoRAContext | None" = None,
     ) -> torch.Tensor:
         assert isinstance(self.impl, FusedMoEKernelModularImpl)
         return self.impl.apply(
@@ -1632,5 +1619,4 @@ class FusedMoEKernel:
             expert_map=expert_map,
             apply_router_weight_on_input=apply_router_weight_on_input,
             shared_experts_input=shared_experts_input,
-            lora_context=lora_context,
         )

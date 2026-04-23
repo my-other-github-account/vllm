@@ -6,10 +6,7 @@ import functools
 import json
 import os
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from vllm.model_executor.layers.fused_moe.lora_context import MoELoRAContext
+from typing import Any
 
 import torch
 
@@ -2003,7 +2000,6 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
-        lora_context: "MoELoRAContext | None" = None,
     ):
         # Check constraints.
         if self.quant_config.use_int4_w4a16:
@@ -2107,6 +2103,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         expert_ids_lora = None
         num_tokens_post_padded_lora = None
         token_lora_mapping = None
+        lora_context = self._lora_context
         if lora_context is not None:
             (
                 sorted_token_ids_lora,
@@ -2246,7 +2243,6 @@ class TritonWNA16Experts(TritonExperts):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
-        lora_context: "MoELoRAContext | None" = None,
     ):
         # Check constraints.
         if self.quant_config.use_int4_w4a16:

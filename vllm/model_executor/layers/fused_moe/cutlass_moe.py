@@ -2,12 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CUTLASS based Fused MoE kernels."""
 
-from typing import TYPE_CHECKING
-
 import torch
-
-if TYPE_CHECKING:
-    from vllm.model_executor.layers.fused_moe.lora_context import MoELoRAContext
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
@@ -348,7 +343,6 @@ class CutlassExpertsFp8Base(mk.FusedMoEExpertsModular):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
-        lora_context: "MoELoRAContext | None" = None,
     ):
         assert self.w1_zp is None, "w1_zp is not supported in CUTLASS MoE"
         assert self.w2_zp is None, "w2_zp is not supported in CUTLASS MoE"
@@ -774,7 +768,6 @@ class CutlassExpertsFp4(mk.FusedMoEExpertsModular):
         workspace2: torch.Tensor | None,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
-        lora_context: "MoELoRAContext | None" = None,
     ):
         e, m, n, k, _ = self.moe_problem_size(hidden_states, w1, w2, topk_ids)
         n = w2.shape[2] * 2
@@ -1072,7 +1065,6 @@ class CutlassExpertsMxfp4(mk.FusedMoEExpertsModular):
         workspace2: torch.Tensor | None,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
-        lora_context: "MoELoRAContext | None" = None,
     ):
         e, m, n, k, _ = self.moe_problem_size(hidden_states, w1, w2, topk_ids)
         n = w2.shape[2] * 2
@@ -1356,7 +1348,6 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEExpertsModular):
         workspace2: torch.Tensor | None,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
-        lora_context: "MoELoRAContext | None" = None,
     ):
         assert self.w1_zp is None, "w1_zp is not supported in CUTLASS MoE"
         assert self.w2_zp is None, "w2_zp is not supported in CUTLASS MoE"

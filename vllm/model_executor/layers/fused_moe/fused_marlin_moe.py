@@ -3,12 +3,8 @@
 """Fused MoE utilities for GPTQ."""
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING
 
 import torch
-
-if TYPE_CHECKING:
-    from vllm.model_executor.layers.fused_moe.lora_context import MoELoRAContext
 
 import vllm._custom_ops as ops
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -718,12 +714,12 @@ class MarlinExperts(LoRAExpertsMixin, MarlinExpertsBase):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
-        lora_context: "MoELoRAContext | None" = None,
     ):
         assert self.w1_scale is not None
         assert self.w2_scale is not None
 
-        if lora_context is None:
+        ctx = self._lora_context
+        if ctx is None:
             fused_marlin_moe(
                 hidden_states=hidden_states,
                 w1=w1,
@@ -764,7 +760,6 @@ class MarlinExperts(LoRAExpertsMixin, MarlinExpertsBase):
         # intermediate_cache1 is indexed by flat (token, expert) pair index,
         # which is compatible with add_lora_fused_moe's scatter mechanism.
 
-        ctx = lora_context
         M = hidden_states.size(0)
         top_k_num = topk_ids.size(1)
         lora_state: dict = {}
@@ -932,7 +927,6 @@ class BatchedMarlinExperts(MarlinExpertsBase):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
-        lora_context: "MoELoRAContext | None" = None,
     ):
         assert expert_tokens_meta is not None, "Num valid tokens per batch is required"
         return batched_fused_marlin_moe(

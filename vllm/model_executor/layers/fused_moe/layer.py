@@ -3,10 +3,7 @@
 
 from collections.abc import Callable, Iterable
 from enum import Enum
-from typing import TYPE_CHECKING, Literal, cast, get_args, overload
-
-if TYPE_CHECKING:
-    from vllm.model_executor.layers.fused_moe.lora_context import MoELoRAContext
+from typing import Literal, cast, get_args, overload
 
 import torch
 from torch.nn.parameter import UninitializedParameter
@@ -609,12 +606,6 @@ class FusedMoE(PluggableLayer):
             if apply_routed_scale_to_output
             else 1.0,
         )
-
-        # Set permanently by FusedMoEWithLoRA.set_mapping() when the active
-        # kernel supports native LoRA (supports_lora() is True).
-        # FusedMoEModularMethod.apply() reads this and passes it down to
-        # FusedMoEKernel → FusedMoEExpertsModular.apply().
-        self._lora_context: MoELoRAContext | None = None
 
     # TODO(bnell): This method is provided as a hook so vllm/lora/layers/fused_moe.py
     # can safely swap out the quant_method. We should figure out a less

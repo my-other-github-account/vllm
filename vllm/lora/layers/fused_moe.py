@@ -68,9 +68,10 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             f"{type(moe_kernel.fused_experts).__name__} does not support LoRA. "
             "For unquantized MoE, set moe_backend='triton' or moe_backend='auto' "
             "(auto selects Triton automatically when LoRA is enabled). "
-            "For quantized MoE, implement supports_lora() -> True and handle "
-            "lora_context in apply()."
+            "For quantized MoE, mix LoRAExpertsMixin into the experts class "
+            "and consume self._lora_context in apply()."
         )
+        self._fused_experts = moe_kernel.fused_experts
         self.base_layer._replace_quant_method(
             FusedMoEModularMethod(self.base_layer.quant_method, moe_kernel)
         )
@@ -331,7 +332,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
     def set_mapping(self, punica_wrapper):
         super().set_mapping(punica_wrapper)
-        self.base_layer._lora_context = self._build_lora_context()
+        self._fused_experts.set_lora_context(self._build_lora_context())
 
     def forward(self, *args, **kwargs):
         return self.base_layer.forward(*args, **kwargs)
