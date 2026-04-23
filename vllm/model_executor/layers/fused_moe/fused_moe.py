@@ -28,6 +28,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     _get_config_dtype_str,
 )
+from vllm.model_executor.layers.fused_moe.lora_experts_mixin import LoRAExpertsMixin
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size,
 )
@@ -1890,7 +1891,7 @@ def fused_experts_impl(
     return out_hidden_states
 
 
-class TritonExperts(mk.FusedMoEExpertsModular):
+class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
     """Triton-based fused MoE expert implementation."""
 
     def __init__(
@@ -1960,10 +1961,6 @@ class TritonExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_batch_invariance():
-        return True
-
-    @staticmethod
-    def supports_lora() -> bool:
         return True
 
     def supports_expert_map(self) -> bool:

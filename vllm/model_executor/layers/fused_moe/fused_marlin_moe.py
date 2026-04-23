@@ -21,6 +21,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
+from vllm.model_executor.layers.fused_moe.lora_experts_mixin import LoRAExpertsMixin
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     batched_moe_align_block_size,
     moe_align_block_size,
@@ -655,12 +656,8 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
         return E, M, N, K, topk
 
 
-class MarlinExperts(MarlinExpertsBase):
+class MarlinExperts(LoRAExpertsMixin, MarlinExpertsBase):
     """Marlin-based fused MoE expert implementation."""
-
-    @staticmethod
-    def supports_lora() -> bool:
-        return True
 
     def supports_expert_map(self) -> bool:
         return True

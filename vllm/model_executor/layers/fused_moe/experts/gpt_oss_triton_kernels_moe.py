@@ -20,6 +20,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.fused_moe.lora_experts_mixin import LoRAExpertsMixin
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
@@ -659,7 +660,7 @@ class OAITritonExperts(BaseOAITritonExperts):
         )
 
 
-class UnfusedOAITritonExperts(BaseOAITritonExperts):
+class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
     """
     A Triton based MoE expert class that operates on expert standard
     format and explicitly keeps the activation and reduction (moe_sum) steps
@@ -668,10 +669,6 @@ class UnfusedOAITritonExperts(BaseOAITritonExperts):
 
     One use case for it is to inject LoRA modules on the activation and moe_sum.
     """
-
-    @staticmethod
-    def supports_lora() -> bool:
-        return True
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
