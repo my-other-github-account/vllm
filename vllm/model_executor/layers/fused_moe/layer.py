@@ -6,7 +6,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Literal, cast, get_args, overload
 
 if TYPE_CHECKING:
-    from vllm.lora.lora_context import MoELoRAContext
+    from vllm.model_executor.layers.fused_moe.lora_context import MoELoRAContext
 
 import torch
 from torch.nn.parameter import UninitializedParameter

@@ -9,7 +9,7 @@ import torch
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
-    from vllm.lora.lora_context import MoELoRAContext
+    from vllm.model_executor.layers.fused_moe.lora_context import MoELoRAContext
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,

@@ -86,7 +86,7 @@ from vllm.utils.deep_gemm import (
 )
 
 if TYPE_CHECKING:
-    from vllm.lora.lora_context import MoELoRAContext
+    from vllm.model_executor.layers.fused_moe.lora_context import MoELoRAContext
     from vllm.model_executor.models.utils import WeightsMapper
 
 ACTIVATION_SCHEMES = ["static", "dynamic"]

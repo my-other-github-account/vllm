@@ -96,7 +96,7 @@ from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.utils.flashinfer import flashinfer_trtllm_fp8_block_scale_moe
 
 if TYPE_CHECKING:
-    from vllm.lora.lora_context import MoELoRAContext
+    from vllm.model_executor.layers.fused_moe.lora_context import MoELoRAContext
     from vllm.model_executor.models.utils import WeightsMapper
 
 logger = init_logger(__name__)

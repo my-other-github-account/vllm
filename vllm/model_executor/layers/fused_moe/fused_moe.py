@@ -9,7 +9,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from vllm.lora.lora_context import MoELoRAContext
+    from vllm.model_executor.layers.fused_moe.lora_context import MoELoRAContext
 
 import torch
 

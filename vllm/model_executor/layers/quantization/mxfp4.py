@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 import torch
 
 if TYPE_CHECKING:
-    from vllm.lora.lora_context import MoELoRAContext
+    from vllm.model_executor.layers.fused_moe.lora_context import MoELoRAContext
 
 from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger

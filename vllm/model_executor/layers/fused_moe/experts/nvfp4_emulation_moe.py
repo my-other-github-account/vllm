@@ -24,7 +24,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 
 if TYPE_CHECKING:
-    from vllm.lora.lora_context import MoELoRAContext
+    from vllm.model_executor.layers.fused_moe.lora_context import MoELoRAContext
 from vllm.model_executor.layers.fused_moe.fused_moe import TritonExperts
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (

@@ -4,7 +4,7 @@
 from typing import TYPE_CHECKING, Any, Union
 
 if TYPE_CHECKING:
-    from vllm.lora.lora_context import MoELoRAContext
+    from vllm.model_executor.layers.fused_moe.lora_context import MoELoRAContext
 
 import torch
 from packaging import version
