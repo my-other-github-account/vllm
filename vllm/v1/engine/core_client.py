@@ -1181,7 +1181,12 @@ class DPAsyncMPClient(AsyncMPClient):
         if resources.stats_update_task is not None:
             return
 
-        assert self.stats_update_address is not None
+        # external DP LB for non-MoE models does not start a coordinator
+        if self.stats_update_address is None:
+            assert not self.vllm_config.model_config.is_moe
+            self.engines_running = True
+            return
+
         stats_addr: str = self.stats_update_address
         assert len(self.engine_ranks_managed) > 0
 
