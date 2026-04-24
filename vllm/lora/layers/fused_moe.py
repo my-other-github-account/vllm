@@ -18,10 +18,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
     FusedMoEModularMethod,
 )
 from vllm.model_executor.layers.fused_moe.lora_context import MoELoRAContext
-from vllm.model_executor.layers.fused_moe.modular_kernel import (
-    FusedMoEExpertsModular,
-    FusedMoEKernel,
-)
+from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoDPEPModular,
 )
@@ -61,10 +58,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     prepare_finalize, self.base_layer
                 ),
             )
-        assert (
-            isinstance(moe_kernel.fused_experts, FusedMoEExpertsModular)
-            and moe_kernel.fused_experts.supports_lora()
-        ), (
+        assert moe_kernel.supports_lora(), (
             f"{type(moe_kernel.fused_experts).__name__} does not support LoRA. "
             "For unquantized MoE, set moe_backend='triton' or moe_backend='auto' "
             "(auto selects Triton automatically when LoRA is enabled). "

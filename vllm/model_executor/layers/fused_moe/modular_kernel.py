@@ -1538,6 +1538,9 @@ class FusedMoEKernel:
     def fused_experts(self) -> FusedMoEExperts:
         return self.impl.fused_experts
 
+    def supports_lora(self) -> bool:
+        return self.fused_experts.supports_lora()
+
     def _post_init_setup(self):
         """
         Resolve any leftover setup dependencies between self.prepare_finalize
