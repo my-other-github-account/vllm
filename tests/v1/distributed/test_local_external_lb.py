@@ -69,7 +69,6 @@ def test_local_external_lb_state_aggregates_status():
             LocalExternalLBChildStatus(0, 4, 8000, healthy=True, ready=True),
             LocalExternalLBChildStatus(1, 5, 8001, healthy=True, ready=False),
         ],
-        models_payload=b'{"object":"list","data":[]}',
     )
 
     assert state.is_healthy() is True
