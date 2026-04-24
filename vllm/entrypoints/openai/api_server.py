@@ -715,4 +715,11 @@ if __name__ == "__main__":
     args = parser.parse_args()
     validate_parsed_serve_args(args)
 
-    uvloop.run(run_server(args))
+    if args.data_parallel_local_external_lb:
+        from vllm.entrypoints.openai.local_external_lb import (
+            run_local_external_lb_supervisor,
+        )
+
+        run_local_external_lb_supervisor(args)
+    else:
+        uvloop.run(run_server(args))
