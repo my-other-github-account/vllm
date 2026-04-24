@@ -173,7 +173,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
     ) -> None:
         """Initializes lora matrices."""
 
-        self._verify_ep_fs(self, lora_config)
+        self._verify_ep_fs(lora_config)
         self.max_loras = lora_config.max_loras
         self.fully_sharded = lora_config.fully_sharded_loras
 
@@ -435,7 +435,7 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         """Initializes lora matrices."""
 
         assert isinstance(model_config, PretrainedConfig)
-        self._verify_ep_fs(self, lora_config)
+        self._verify_ep_fs(lora_config)
         self._base_model = model_config.architectures[0]
         self.max_loras = lora_config.max_loras
         self.fully_sharded = lora_config.fully_sharded_loras
