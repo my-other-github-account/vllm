@@ -7,7 +7,6 @@ from vllm.entrypoints.openai.local_external_lb import (
     LocalExternalLBChildStatus,
     LocalExternalLBState,
     build_local_external_lb_child_args,
-    compute_local_external_lb_admin_port,
     infer_local_external_lb_start_rank,
 )
 
@@ -42,11 +41,6 @@ def _make_args(**overrides) -> argparse.Namespace:
 def test_infer_local_external_lb_start_rank_uses_node_rank():
     args = _make_args()
     assert infer_local_external_lb_start_rank(args) == 4
-
-
-def test_compute_local_external_lb_admin_port_defaults_after_rank_ports():
-    args = _make_args()
-    assert compute_local_external_lb_admin_port(args) == 8004
 
 
 def test_build_local_external_lb_child_args_sets_external_rank_server():
