@@ -7,10 +7,6 @@ from transformers import PretrainedConfig
 
 from vllm import envs
 from vllm.config.lora import LoRAConfig
-from vllm.distributed.parallel_state import (
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
-)
 from vllm.distributed.utils import divide
 from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.model_executor.layers.fused_moe import FusedMoE
@@ -41,8 +37,11 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         assert not self.base_layer.quant_method.is_monolithic, (
             "Monolithic kernels are not supported for Fused MoE LoRA."
         )
-        self.tp_size = get_tensor_model_parallel_world_size()
-        self.tp_rank = get_tensor_model_parallel_rank()
+        # Use the MoE-aware TP rank/size: when EP is active, FusedMoE collapses
+        # moe_parallel_config.tp_size to 1 (experts are sharded across the
+        # TP group instead).
+        self.tp_size = self.base_layer.tp_size
+        self.tp_rank = self.base_layer.tp_rank
         self.device = _get_lora_device(base_layer)
         # For non-gated MoE (is_act_and_mul=False), only 1 slice is needed
         # since there's only up_proj (w1), not gate_proj + up_proj (w1 + w3)
