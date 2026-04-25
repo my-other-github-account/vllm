@@ -125,7 +125,7 @@ def test_gpt_oss_lora_tp2(
             enable_lora=True,
             max_loras=2,
             max_num_seqs=2,
-            max_num_batched_tokens=2048,
+            max_num_batched_tokens=1024,
             tensor_parallel_size=2,
             gpu_memory_utilization=0.8,
             fully_sharded_loras=fully_sharded_loras,
