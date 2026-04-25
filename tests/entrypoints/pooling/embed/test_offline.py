@@ -37,11 +37,11 @@ def llm():
         seed=0,
         attention_config=attention_config,
     )
+    assert embedding_size == llm.model_config.embedding_size
 
     yield weakref.proxy(llm)
 
     del llm
-
     cleanup_dist_env_and_memory()
 
 
@@ -96,10 +96,14 @@ def test_pooling_params(llm: LLM):
     )
 
 
-@pytest.mark.parametrize("task", ["token_classify", "classify", "plugin"])
+@pytest.mark.parametrize(
+    "task", ["token_classify", "classify", "token_embed", "plugin"]
+)
 def test_unsupported_tasks(llm: LLM, task: PoolingTask):
     if task == "plugin":
         err_msg = "No IOProcessor plugin installed."
+    elif task == "token_embed":
+        err_msg = "Try switching the model's pooling_task via.+"
     else:
         err_msg = "Classification API is not supported by this model.+"
     with pytest.raises(ValueError, match=err_msg):

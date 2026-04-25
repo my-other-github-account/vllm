@@ -97,10 +97,12 @@ def test_score_api(llm: LLM):
         llm.score("ping", "pong", use_tqdm=False)
 
 
-@pytest.mark.parametrize("task", ["embed", "token_embed", "plugin"])
+@pytest.mark.parametrize("task", ["embed", "token_embed", "token_classify", "plugin"])
 def test_unsupported_tasks(llm: LLM, task: PoolingTask):
     if task == "plugin":
         err_msg = "No IOProcessor plugin installed."
+    elif task == "token_classify":
+        err_msg = "Try switching the model's pooling_task via.+"
     else:
         err_msg = "Embedding API is not supported by this model.+"
     with pytest.raises(ValueError, match=err_msg):

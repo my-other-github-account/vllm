@@ -61,10 +61,12 @@ def test_token_ids_prompts(llm: LLM):
     assert outputs[0].outputs.data.shape == (11, 384)
 
 
-@pytest.mark.parametrize("task", ["classify", "token_classify", "plugin"])
-def test_unsupported_tasks(llm: LLM, task: PoolingTask):
+@pytest.mark.parametrize("task", ["embed", "classify", "token_classify", "plugin"])
+def test_unsupported_tasks(llm: LLM, task: PoolingTask, caplog_vllm):
     if task == "plugin":
         err_msg = "No IOProcessor plugin installed."
+    elif task == "embed":
+        err_msg = "Try switching the model's pooling_task via.+"
     else:
         err_msg = "Classification API is not supported by this model.+"
 

@@ -59,15 +59,17 @@ def test_token_ids_prompts(llm: LLM):
 
 @pytest.mark.skip_global_cleanup
 def test_score_api(llm: LLM):
-    err_msg = "Scoring API is only enabled for num_labels == 1."
+    err_msg = "This model does not support the Scoring API."
     with pytest.raises(ValueError, match=err_msg):
         llm.score("ping", "pong", use_tqdm=False)
 
 
-@pytest.mark.parametrize("task", ["embed", "token_embed", "plugin"])
-def test_unsupported_tasks(llm: LLM, task: PoolingTask):
+@pytest.mark.parametrize("task", ["classify", "embed", "token_embed", "plugin"])
+def test_unsupported_tasks(llm: LLM, task: PoolingTask, caplog_vllm):
     if task == "plugin":
         err_msg = "No IOProcessor plugin installed."
+    elif task == "classify":
+        err_msg = "Try switching the model's pooling_task via.+"
     else:
         err_msg = "Embedding API is not supported by this model.+"
 
