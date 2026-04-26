@@ -343,15 +343,17 @@ def sparse_attn_indexer(
                 fast_topk_v2_raw,
                 plan_topk_v2,
             )
-            fast_topk_v2_metadata = getattr(attn_metadata, "fast_topk_v2_metadata", None)
             seq_lens_flat = seq_lens.reshape(-1)
-            if fast_topk_v2_metadata is None:
-                fast_topk_v2_metadata = plan_topk_v2(seq_lens_flat)
-                attn_metadata.fast_topk_v2_metadata = fast_topk_v2_metadata
+            # Cache plan in the forward-context attn_metadata dict so all
+            # indexer layers in one forward pass share a single plan call.
+            fast_topk_v2_plan = attn_metadata.get("_fast_topk_v2_plan")
+            if fast_topk_v2_plan is None:
+                fast_topk_v2_plan = plan_topk_v2(seq_lens_flat)
+                attn_metadata["_fast_topk_v2_plan"] = fast_topk_v2_plan
             fast_topk_v2_raw(
                 logits,
                 seq_lens_flat,
-                metadata=fast_topk_v2_metadata,
+                metadata=fast_topk_v2_plan,
                 topk_indices=topk_indices,
             )
         elif current_platform.is_cuda() and topk_tokens in (512, 2048):
