@@ -46,56 +46,56 @@ def infer_local_external_lb_start_rank(args: argparse.Namespace) -> int:
 
 def validate_local_external_lb_args(args: argparse.Namespace) -> None:
     if getattr(args, "grpc", False):
-        raise TypeError(
+        raise ValueError(
             "Error: --data-parallel-local-external-lb does not support --grpc"
         )
     if args.uds is not None:
-        raise TypeError(
+        raise ValueError(
             "Error: --data-parallel-local-external-lb does not support --uds"
         )
     if any((args.ssl_keyfile, args.ssl_certfile, args.ssl_ca_certs)):
-        raise TypeError(
+        raise ValueError(
             "Error: --data-parallel-local-external-lb does not support HTTPS yet"
         )
     if args.api_server_count not in (None, 1):
-        raise TypeError(
+        raise ValueError(
             "Error: --data-parallel-local-external-lb currently requires "
             "--api-server-count=1"
         )
     if args.data_parallel_rank is not None:
-        raise TypeError(
+        raise ValueError(
             "Error: --data-parallel-local-external-lb manages child "
             "--data-parallel-rank values internally"
         )
     if args.data_parallel_external_lb or args.data_parallel_hybrid_lb:
-        raise TypeError(
+        raise ValueError(
             "Error: --data-parallel-local-external-lb cannot be combined with "
             "--data-parallel-external-lb or --data-parallel-hybrid-lb"
         )
     if args.data_parallel_size < 2:
-        raise TypeError(
+        raise ValueError(
             "Error: --data-parallel-local-external-lb requires --data-parallel-size > 1"
         )
 
     local_size = args.data_parallel_size_local
     if local_size is None or local_size < 2:
-        raise TypeError(
+        raise ValueError(
             "Error: --data-parallel-local-external-lb requires "
             "--data-parallel-size-local >= 2"
         )
     if local_size > args.data_parallel_size:
-        raise TypeError(
+        raise ValueError(
             "Error: --data-parallel-size-local cannot exceed --data-parallel-size"
         )
     if args.data_parallel_size % local_size != 0:
-        raise TypeError(
+        raise ValueError(
             "Error: --data-parallel-size must be divisible by "
             "--data-parallel-size-local"
         )
 
     start_rank = infer_local_external_lb_start_rank(args)
     if start_rank + local_size > args.data_parallel_size:
-        raise TypeError(
+        raise ValueError(
             "Error: local supervised ranks would exceed --data-parallel-size"
         )
 
@@ -103,7 +103,7 @@ def validate_local_external_lb_args(args: argparse.Namespace) -> None:
     child_port_min = args.port
     child_port_max = args.port + local_size - 1
     if child_port_min <= admin_port <= child_port_max:
-        raise TypeError(
+        raise ValueError(
             f"Error: --data-parallel-admin-port {admin_port} "
             f"overlaps with child rank ports {child_port_min}-{child_port_max}"
         )
