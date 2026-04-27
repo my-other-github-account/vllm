@@ -196,8 +196,6 @@ class KVConnectorBase_V1(ABC):
             self._kv_transfer_config = vllm_config.kv_transfer_config
         else:
             raise ValueError("kv_transfer_config must be set for KVConnectorBase_V1")
-        if kv_cache_config is None:
-            raise ValueError("kv_cache_config must be set for KVConnectorBase_V1")
         self._kv_cache_config = kv_cache_config
         self._role = role
 
