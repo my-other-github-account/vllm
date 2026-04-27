@@ -287,6 +287,7 @@ def dcp_a2a_lse_reduce(
     ctx: CPTritonContext | None = None,
     return_lse: bool = False,
     is_lse_base_on_e: bool = True,
+    scratch_workspace: torch.Tensor | None = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """
     Combine partial attention outputs across DCP ranks using All-to-All.
@@ -336,6 +337,7 @@ def dcp_a2a_lse_reduce(
         ((world_size, B, H_per_rank, D), local_output.dtype),
         ((world_size, B, H_per_rank), local_lse.dtype),
         ((world_size, B, H_per_rank), local_lse.dtype),
+        scratch_workspace=scratch_workspace,
     )
     send_output.copy_(
         local_output.view(B, world_size, H_per_rank, D).permute(1, 0, 2, 3)

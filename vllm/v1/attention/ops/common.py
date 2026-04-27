@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from math import prod
+
 import torch
 
 from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import round_up
 from vllm.v1.worker.workspace import (
-    COMM_WORKSPACE_POOL,
     current_workspace_manager,
     is_workspace_manager_initialized,
 )
@@ -112,17 +114,38 @@ class CPTritonContext:
             self.inner_kernel[grid](*regular_args)
 
 
+def cp_collective_scratch_bytes(
+    *shapes_and_dtypes: tuple[tuple[int, ...], torch.dtype],
+) -> int:
+    return sum(
+        round_up(prod(shape) * dtype.itemsize, 256)
+        for shape, dtype in shapes_and_dtypes
+    )
+
+
 def get_cp_collective_scratch_tensors(
     device: torch.device,
     *shapes_and_dtypes: tuple[tuple[int, ...], torch.dtype],
+    scratch_workspace: torch.Tensor | None = None,
 ) -> list[torch.Tensor]:
+    if scratch_workspace is not None:
+        offset = 0
+        tensors: list[torch.Tensor] = []
+        for shape, dtype in shapes_and_dtypes:
+            actual_bytes = prod(shape) * dtype.itemsize
+            aligned_bytes = round_up(actual_bytes, 256)
+            tensors.append(
+                scratch_workspace[offset : offset + actual_bytes]
+                .view(dtype)
+                .reshape(shape)
+            )
+            offset += aligned_bytes
+        return tensors
     # get workspace from workspace manager
     if is_workspace_manager_initialized():
         workspace_manager = current_workspace_manager()
         try:
-            return workspace_manager.get_simultaneous(
-                *shapes_and_dtypes, pool=COMM_WORKSPACE_POOL
-            )
+            return workspace_manager.get_simultaneous(*shapes_and_dtypes)
         except AssertionError:
             if not workspace_manager.is_locked():
                 raise
@@ -155,16 +178,13 @@ def reserve_cp_collective_workspace(
     workspace_manager = current_workspace_manager()
     workspace_manager.get_simultaneous(
         ((max_num_tokens * cp_world_size, local_heads, gather_head_dim), dtype),
-        pool=COMM_WORKSPACE_POOL,
     )
     workspace_manager.get_simultaneous(
         ((total_heads, max_num_tokens, reduce_scatter_head_dim), dtype),
         ((local_heads, max_num_tokens, reduce_scatter_head_dim), dtype),
-        pool=COMM_WORKSPACE_POOL,
     )
     workspace_manager.get_simultaneous(
         ((cp_world_size * max_num_tokens, total_heads), lse_dtype),
-        pool=COMM_WORKSPACE_POOL,
     )
     if reserve_a2a:
         workspace_manager.get_simultaneous(
@@ -178,7 +198,6 @@ def reserve_cp_collective_workspace(
             ),
             ((cp_world_size, max_num_tokens, local_heads), lse_dtype),
             ((cp_world_size, max_num_tokens, local_heads), lse_dtype),
-            pool=COMM_WORKSPACE_POOL,
         )
 
 
@@ -214,6 +233,7 @@ def cp_all_gather_heads(
 def cp_reduce_scatter_heads(
     cp_attn_out: torch.Tensor,
     cp_group: GroupCoordinator,
+    scratch_workspace: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Reduce-scatter a [B, H_total, D] tensor across ranks on the head axis."""
     if cp_group.world_size == 1:
@@ -228,6 +248,7 @@ def cp_reduce_scatter_heads(
         cp_attn_out.device,
         ((total_heads, batch_size, head_dim), cp_attn_out.dtype),
         ((local_heads, batch_size, head_dim), cp_attn_out.dtype),
+        scratch_workspace=scratch_workspace,
     )
     rs_input.copy_(cp_attn_out.movedim(0, 1))
     cp_group.reduce_scatter_tensor(rs_output, rs_input)
@@ -318,6 +339,7 @@ def _cp_lse_common(
     cp_group: GroupCoordinator,
     ctx: CPTritonContext | None = None,
     is_lse_base_on_e=True,
+    scratch_workspace: torch.Tensor | None = None,
 ):
     """
     cp_attn_out: [ B, H, D ]
@@ -334,6 +356,7 @@ def _cp_lse_common(
     (lses_flat,) = get_cp_collective_scratch_tensors(
         cp_attn_lse.device,
         ((cp_group.world_size * batch_size, num_heads), cp_attn_lse.dtype),
+        scratch_workspace=scratch_workspace,
     )
     cp_group.all_gather_into_tensor(lses_flat, cp_attn_lse)
     lses = lses_flat.view((cp_group.world_size,) + cp_attn_lse.shape)
@@ -354,15 +377,21 @@ def cp_lse_ag_out_rs(
     ctx: CPTritonContext | None = None,
     return_lse: bool = False,
     is_lse_base_on_e=True,
+    scratch_workspace: torch.Tensor | None = None,
 ):
     """
     cp_attn_out: [ B, H, D ]
     cp_attn_lse: [ B, H ]
     """
     out, lse = _cp_lse_common(
-        cp_attn_out, cp_attn_lse, cp_group, ctx=ctx, is_lse_base_on_e=is_lse_base_on_e
+        cp_attn_out,
+        cp_attn_lse,
+        cp_group,
+        ctx=ctx,
+        is_lse_base_on_e=is_lse_base_on_e,
+        scratch_workspace=scratch_workspace,
     )
-    out = cp_reduce_scatter_heads(out, cp_group)
+    out = cp_reduce_scatter_heads(out, cp_group, scratch_workspace=scratch_workspace)
 
     if return_lse:
         cp_num_heads = lse.shape[1] // cp_group.world_size
