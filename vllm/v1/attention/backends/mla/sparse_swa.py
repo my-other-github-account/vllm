@@ -289,8 +289,15 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         is_valid_token = self.is_valid_token[: slot_mapping.shape[0]]
         is_valid_token.copy_(slot_mapping >= 0)
 
+        # Always zero ALL positions before writing fresh values.
+        # For PIECEWISE mode: DP ranks with 0 real tokens are padded to
+        # synced_num_tokens by sync_cudagraph_and_dp_padding. Those dummy
+        # positions retain stale values unless pre-zeroed here, causing the
+        # SM100 decode kernel to crash (get_decoding_sched_meta_kernel forces
+        # cur_s_k=1 for 0-length entries, so dummy rows are always processed).
+        self.decode_swa_lens[:] = 0
+        self.decode_swa_indices.zero_()
         if num_decode_tokens > 0:
-            self.decode_swa_lens[num_decode_tokens:] = 0
             _compute_swa_indices_and_lens_kernel[(num_decode_tokens,)](
                 self.decode_swa_indices,
                 self.decode_swa_indices.stride(0),
@@ -454,6 +461,18 @@ def _compute_swa_indices_and_lens_kernel(
     is_valid = tl.load(is_valid_token_ptr + token_idx)
     if not is_valid:
         tl.store(swa_lens_ptr + token_idx, 0)
+        # Zero out swa_indices for padding rows. get_decoding_sched_meta_kernel
+        # forces cur_s_k=1 for 0-length entries, so the SM100 decode kernel
+        # will still read swa_indices for these rows. Without zeroing, stale
+        # slot IDs from a previous step's real request remain and can reference
+        # KV cache blocks beyond any valid range, triggering cudaErrorIllegalAddress.
+        for i in range(0, window_size, TRITON_BLOCK_SIZE):
+            offset = i + tl.arange(0, TRITON_BLOCK_SIZE)
+            tl.store(
+                swa_indices_ptr + token_idx * swa_indices_stride + offset,
+                tl.zeros((TRITON_BLOCK_SIZE,), dtype=tl.int32),
+                mask=offset < window_size,
+            )
         return
 
     req_idx = tl.load(token_to_req_indices_ptr + token_idx)

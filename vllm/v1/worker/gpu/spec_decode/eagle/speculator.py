@@ -525,6 +525,9 @@ class EagleSpeculator:
 
         # Each request produces exactly 1 token per draft generation step,
         # enabling FULL graph replay.
+        # Use eager during dummy runs: the FULL graph was captured with
+        # real KV-cache pointers, but dummy runs use placeholder block tables
+        # that may not have valid backing memory at replay time.
         decode_batch_desc, num_tokens_across_dp = dispatch_cg_and_sync_dp(
             self.decode_cudagraph_manager,
             num_reqs,
@@ -532,7 +535,7 @@ class EagleSpeculator:
             uniform_token_count=1,
             dp_size=self.dp_size,
             dp_rank=self.dp_rank,
-            need_eager=is_profile,
+            need_eager=is_profile or dummy_run,
         )
 
         attn_metadata_updated = None

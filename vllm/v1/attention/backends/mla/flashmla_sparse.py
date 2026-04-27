@@ -676,6 +676,15 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
         )
 
         num_total = num_decode_tokens + num_prefill_tokens
+
+        # Always zero decode buffers before writing fresh values.
+        # For PIECEWISE mode: DP ranks with 0 real tokens are padded to
+        # synced_num_tokens by sync_cudagraph_and_dp_padding. Stale values
+        # from the previous step cause the SM100 decode kernel to trap
+        # (start_block_idx >= end_block_idx assertion in kernel.cuh).
+        self.c128a_decode_lens_buffer[:] = 0
+        self.c128a_global_decode_buffer.zero_()
+
         if num_total == 0:
             return {}
 

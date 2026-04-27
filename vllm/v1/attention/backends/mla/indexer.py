@@ -295,6 +295,15 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 dtype=torch.int32,
                 device=self.device,
             )
+            # Flat contiguous scratch buffer used when max_decode_len < next_n.
+            # A column-slice of decode_seq_lens_buffer is non-contiguous when
+            # max_decode_len < next_n, but DeepGEMM requires contiguous
+            # context_lens. We copy into this 1D buffer and return a view.
+            self.decode_seq_lens_compact_buffer = torch.zeros(
+                scheduler_config.max_num_seqs * next_n,
+                dtype=torch.int32,
+                device=self.device,
+            )
         else:
             # Flattening or no MTP: 1D buffer for expanded per-token seq_lens.
             self.decode_seq_lens_buffer = torch.zeros(
@@ -460,7 +469,21 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     + 1
                     + self.offsets_buffer[:max_decode_len]
                 )
-                seq_lens = self.decode_seq_lens_buffer[:num_decodes, :max_decode_len]
+                if max_decode_len < next_n:
+                    # Column slice is non-contiguous (row stride = next_n but
+                    # shape width = max_decode_len). DeepGEMM asserts
+                    # context_lens.is_contiguous(), so copy into the compact
+                    # 1D buffer and return a contiguous 2D view of it.
+                    n = num_decodes * max_decode_len
+                    compact = self.decode_seq_lens_compact_buffer[:n]
+                    compact.view(num_decodes, max_decode_len).copy_(
+                        self.decode_seq_lens_buffer[:num_decodes, :max_decode_len]
+                    )
+                    seq_lens = compact.view(num_decodes, max_decode_len)
+                else:
+                    seq_lens = self.decode_seq_lens_buffer[
+                        :num_decodes, :max_decode_len
+                    ]
             return seq_lens, block_table, decode_lens, num_decodes, requires_padding
 
     def build(
@@ -598,8 +621,18 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     self.expanded_seq_lens_buffer[:num_decodes] = (
                         seq_lens // self.compress_ratio
                     )
-                    self.expanded_seq_lens_buffer[num_decodes:num_decode_tokens] = 0
-                    seq_lens = self.expanded_seq_lens_buffer[:num_decode_tokens]
+                    # FULL CG padding rows (num_decode_tokens..num_decodes) have
+                    # seq_len=0 in the padded batch. fp8_fp4_paged_mqa_logits and
+                    # persistent_topk crash with OOB when zero seq_len rows are
+                    # mixed with large seq_len rows in the same batch.
+                    # Padding rows have block_table zeroed → physical block 0
+                    # (valid memory); their logits/topk outputs are never used.
+                    if num_decodes > num_decode_tokens:
+                        self.expanded_seq_lens_buffer[num_decode_tokens:num_decodes] = 1
+                    # Use num_decodes (padded batch size) so the slice matches
+                    # the FULL CG capture size and get_paged_mqa_logits_metadata
+                    # sees the same B as the captured kernel.
+                    seq_lens = self.expanded_seq_lens_buffer[:num_decodes]
 
             # Non-MTP: deep_gemm paged MQA logits requires 2D context_lens
             # (csrc/apis/attention.hpp). Unsqueeze to (B, 1) so downstream
@@ -609,8 +642,12 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
             # DeepGEMM is required for the paged MQA logits on CUDA devices
             if current_platform.is_cuda() and has_deep_gemm():
+                # get_paged_mqa_logits_metadata asserts context_lens.is_contiguous().
+                # The MTP native path may yield a non-contiguous slice of
+                # decode_seq_lens_buffer when max_decode_len < next_n, so we
+                # ensure contiguity here.
                 self.scheduler_metadata_buffer[:] = get_paged_mqa_logits_metadata(
-                    seq_lens,
+                    seq_lens.contiguous(),
                     self.kv_cache_spec.storage_block_size,
                     self.num_sms,
                 )
