@@ -9,15 +9,16 @@ import copy
 import multiprocessing
 import signal
 import threading
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from multiprocessing.process import BaseProcess
-from typing import Any
 
+import uvicorn
 import uvloop
+from fastapi import FastAPI, Response
 
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -203,39 +204,30 @@ class LocalExternalLBState:
             )
 
 
-class _LocalExternalLBHTTPRequestHandler(BaseHTTPRequestHandler):
-    server: _LocalExternalLBHTTPServer
-
-    def do_GET(self) -> None:  # noqa: N802
-        # handle aggregated health and readiness statuses
-        if self.path == "/health":
-            self._send_status(self.server.state.is_healthy())
-            return
-        if self.path in ("/ready", "/readyz"):
-            self._send_status(self.server.state.is_ready())
-            return
-        self.send_error(HTTPStatus.NOT_FOUND)
-
-    def log_message(self, format: str, *args: Any) -> None:
+class _LocalExternalLBUvicornServer(uvicorn.Server):
+    def install_signal_handlers(self) -> None:
+        # we have our own signal handlers so ban uvicorn's
         return
 
-    def _send_status(self, ok: bool) -> None:
-        self.send_response(HTTPStatus.OK if ok else HTTPStatus.SERVICE_UNAVAILABLE)
-        self.send_header("Content-Length", "0")
-        self.end_headers()
 
+def _build_local_external_lb_admin_app(state: LocalExternalLBState) -> FastAPI:
+    app = FastAPI(openapi_url=None, docs_url=None, redoc_url=None)
 
-class _LocalExternalLBHTTPServer(ThreadingHTTPServer):
-    daemon_threads = True
-    allow_reuse_address = True
+    def _status_response(ok: bool) -> Response:
+        return Response(
+            status_code=(HTTPStatus.OK if ok else HTTPStatus.SERVICE_UNAVAILABLE)
+        )
 
-    def __init__(
-        self,
-        server_address: tuple[str, int],
-        state: LocalExternalLBState,
-    ) -> None:
-        self.state = state
-        super().__init__(server_address, _LocalExternalLBHTTPRequestHandler)
+    @app.get("/health", include_in_schema=False)
+    async def health() -> Response:
+        return _status_response(state.is_healthy())
+
+    @app.get("/ready", include_in_schema=False)
+    @app.get("/readyz", include_in_schema=False)
+    async def ready() -> Response:
+        return _status_response(state.is_ready())
+
+    return app
 
 
 def _run_local_external_lb_child(
@@ -268,8 +260,9 @@ class LocalExternalLBSupervisor:
         self.processes: list[BaseProcess] = []
         self._stop_requested = threading.Event()
         self._failed_process: BaseProcess | None = None
-        self._admin_server: _LocalExternalLBHTTPServer | None = None
+        self._admin_server: _LocalExternalLBUvicornServer | None = None
         self._admin_thread: threading.Thread | None = None
+        self._admin_server_error: BaseException | None = None
 
     def run(self) -> None:
         previous_handlers = {
@@ -309,20 +302,51 @@ class LocalExternalLBSupervisor:
 
     def _start_admin_server(self) -> None:
         host = self.args.host or "0.0.0.0"
-        self._admin_server = _LocalExternalLBHTTPServer(
-            (host, self.admin_port), self.state
+        app = _build_local_external_lb_admin_app(self.state)
+        config = uvicorn.Config(
+            app,
+            host=host,
+            port=self.admin_port,
+            log_level=self.args.uvicorn_log_level,
+            access_log=False,
         )
+        self._admin_server = _LocalExternalLBUvicornServer(config)
         self._admin_thread = threading.Thread(
-            target=self._admin_server.serve_forever,
+            target=self._run_admin_server,
             daemon=True,
             name="local-external-lb-admin",
         )
         self._admin_thread.start()
+        self._wait_for_admin_server_startup()
         logger.info_once(
             "Started local external LB admin server on %s:%d",
             host,
             self.admin_port,
         )
+
+    def _run_admin_server(self) -> None:
+        assert self._admin_server is not None
+        try:
+            self._admin_server.run()
+        except BaseException as exc:
+            self._admin_server_error = exc
+
+    def _wait_for_admin_server_startup(self) -> None:
+        assert self._admin_server is not None and self._admin_thread is not None
+
+        deadline = time.monotonic() + 60.0
+        while time.monotonic() < deadline:
+            if self._admin_server_error is not None:
+                raise RuntimeError(
+                    "Failed to start local external LB admin server"
+                ) from self._admin_server_error
+            if self._admin_server.started:
+                return
+            if not self._admin_thread.is_alive():
+                break
+            time.sleep(1)
+
+        raise RuntimeError("Timed out starting local external LB admin server")
 
     def _start_children(self) -> None:
         context = multiprocessing.get_context("spawn")
@@ -376,12 +400,12 @@ class LocalExternalLBSupervisor:
 
     def _shutdown_admin_server(self) -> None:
         if self._admin_server is not None:
-            self._admin_server.shutdown()
-            self._admin_server.server_close()
+            self._admin_server.should_exit = True
         if self._admin_thread is not None:
             self._admin_thread.join(timeout=5.0)
         self._admin_server = None
         self._admin_thread = None
+        self._admin_server_error = None
 
 
 def run_local_external_lb_supervisor(args: argparse.Namespace) -> None:
