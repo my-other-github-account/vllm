@@ -185,37 +185,31 @@ class WorkspaceManager:
                     "Workspace growth is not allowed after locking."
                 )
 
-            for ubatch_id in range(self._num_ubatches):
-                current_workspace = workspaces[ubatch_id]
-                if (
-                    current_workspace is None
-                    or self._workspace_size_bytes(current_workspace) < required_bytes
-                ):
-                    # Delete old tensor before allocating new one to avoid
-                    # memory spike from resize_(). resize_() allocates new
-                    # memory before freeing old, which can cause OOM.
-                    # Must clear the list reference first since local var
-                    # is just a copy of the reference.
-                    workspaces[ubatch_id] = None
-                    del current_workspace
-                    workspaces[ubatch_id] = torch.empty(
-                        (required_bytes,), dtype=torch.uint8, device=self._device
-                    )
+            # Only resize the requesting ubatch's workspace in this pool.
+            # Other ubatches resize lazily on their next get_simultaneous call.
+            # Resizing all ubatches here would orphan another ubatch's old
+            # tensor while it still holds views into it (DBO leak).
+            workspaces[ubatch_id] = None
+            del current_workspace
+            # Release the freed segment back to the accelerator allocator so
+            # the larger allocation below can reuse the memory instead of
+            # leaving dead reserved segments behind.
+            torch.accelerator.empty_cache()
+            workspaces[ubatch_id] = torch.empty(
+                (required_bytes,), dtype=torch.uint8, device=self._device
+            )
+            current_workspace = workspaces[ubatch_id]
 
             if envs.VLLM_DEBUG_WORKSPACE:
                 logger.info(
                     "[WORKSPACE DEBUG] Resized workspace (%s) from '%s': %.2f MB -> "
-                    "%.2f MB (%d ubatches, total memory %.2f MB)",
+                    "%.2f MB (ubatch %d)",
                     pool,
                     get_caller_info(),
                     current_size / _MB,
                     required_bytes / _MB,
-                    self._num_ubatches,
-                    required_bytes * self._num_ubatches / _MB,
+                    ubatch_id,
                 )
-
-            current_workspace = workspaces[dbo_current_ubatch_id()]
-
         return current_workspace
 
 
