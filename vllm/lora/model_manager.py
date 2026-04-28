@@ -562,7 +562,7 @@ class LoRAModelManager:
             else:
                 parts = module_name.split(".")
                 replacements = self.packed_modules_mapping[parts[-1]]
-               if module.__class__.__name__ == "FusedMoEWithLoRA":
+                if module.__class__.__name__ == "FusedMoEWithLoRA":
                     replacements = replacements[
                         : len(module.lora_a_stacked) // self.lora_slots
                     ]
