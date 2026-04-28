@@ -229,12 +229,12 @@ class FrontendArgs(BaseFrontendArgs):
     """Host name."""
     port: int = 8000
     """Port number."""
-    data_parallel_local_external_lb: bool = False
+    data_parallel_multi_port_external_lb: bool = False
     """Run a node-local supervisor that launches one external-LB API server per
-    local data parallel rank and exposes aggregated health on an admin port."""
-    data_parallel_admin_port: int = 9256
-    """Admin HTTP port for aggregated health endpoints in local external LB
-    supervisor mode.."""
+    local data parallel rank and exposes aggregated health on a supervisor port."""
+    data_parallel_supervisor_port: int = 9256
+    """HTTP port for aggregated health endpoints in multi-port external LB
+    mode."""
     uds: str | None = None
     """Unix domain socket path. If set, host and port arguments are ignored."""
     uvicorn_log_level: Literal[
@@ -393,12 +393,12 @@ def validate_parsed_serve_args(args: argparse.Namespace):
     if args.enable_log_outputs and not args.enable_log_requests:
         raise TypeError("Error: --enable-log-outputs requires --enable-log-requests")
 
-    if args.data_parallel_local_external_lb:
+    if args.data_parallel_multi_port_external_lb:
         from vllm.entrypoints.openai.local_external_lb import (
-            validate_local_external_lb_args,
+            validate_multi_port_external_lb_args,
         )
 
-        validate_local_external_lb_args(args)
+        validate_multi_port_external_lb_args(args)
 
 
 def create_parser_for_docs() -> FlexibleArgumentParser:

@@ -5,17 +5,18 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
+import contextlib
 import copy
 import multiprocessing
 import signal
-import threading
 import time
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
+from functools import partial
 from http import HTTPStatus
 from multiprocessing.process import BaseProcess
 
+import aiohttp
 import uvicorn
 import uvloop
 from fastapi import FastAPI, Response
@@ -24,10 +25,10 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.system_utils import (
     decorate_logs,
+    kill_process_tree,
     set_process_title,
     update_environment_variables,
 )
-from vllm.v1.utils import shutdown as shutdown_processes
 
 logger = init_logger(__name__)
 
@@ -35,7 +36,7 @@ HEALTHCHECK_INTERVAL_S = 5.0
 HEALTHCHECK_TIMEOUT_S = 5.0
 
 
-def infer_local_external_lb_start_rank(args: argparse.Namespace) -> int:
+def infer_multi_port_external_lb_start_rank(args: argparse.Namespace) -> int:
     start_rank = getattr(args, "data_parallel_start_rank", None)
     if start_rank is not None:
         return start_rank
@@ -45,43 +46,44 @@ def infer_local_external_lb_start_rank(args: argparse.Namespace) -> int:
     return node_rank * local_size
 
 
-def validate_local_external_lb_args(args: argparse.Namespace) -> None:
+def validate_multi_port_external_lb_args(args: argparse.Namespace) -> None:
     if getattr(args, "grpc", False):
         raise ValueError(
-            "Error: --data-parallel-local-external-lb does not support --grpc"
+            "Error: --data-parallel-multi-port-external-lb does not support --grpc"
         )
     if args.uds is not None:
         raise ValueError(
-            "Error: --data-parallel-local-external-lb does not support --uds"
+            "Error: --data-parallel-multi-port-external-lb does not support --uds"
         )
     if any((args.ssl_keyfile, args.ssl_certfile, args.ssl_ca_certs)):
         raise ValueError(
-            "Error: --data-parallel-local-external-lb does not support HTTPS yet"
+            "Error: --data-parallel-multi-port-external-lb does not support HTTPS yet"
         )
     if args.api_server_count not in (None, 1):
         raise ValueError(
-            "Error: --data-parallel-local-external-lb currently requires "
+            "Error: --data-parallel-multi-port-external-lb currently requires "
             "--api-server-count=1"
         )
     if args.data_parallel_rank is not None:
         raise ValueError(
-            "Error: --data-parallel-local-external-lb manages child "
+            "Error: --data-parallel-multi-port-external-lb manages child "
             "--data-parallel-rank values internally"
         )
     if args.data_parallel_external_lb or args.data_parallel_hybrid_lb:
         raise ValueError(
-            "Error: --data-parallel-local-external-lb cannot be combined with "
+            "Error: --data-parallel-multi-port-external-lb cannot be combined with "
             "--data-parallel-external-lb or --data-parallel-hybrid-lb"
         )
     if args.data_parallel_size < 2:
         raise ValueError(
-            "Error: --data-parallel-local-external-lb requires --data-parallel-size > 1"
+            "Error: --data-parallel-multi-port-external-lb requires "
+            "--data-parallel-size > 1"
         )
 
     local_size = args.data_parallel_size_local
     if local_size is None or local_size < 2:
         raise ValueError(
-            "Error: --data-parallel-local-external-lb requires "
+            "Error: --data-parallel-multi-port-external-lb requires "
             "--data-parallel-size-local >= 2"
         )
     if local_size > args.data_parallel_size:
@@ -94,41 +96,41 @@ def validate_local_external_lb_args(args: argparse.Namespace) -> None:
             "--data-parallel-size-local"
         )
 
-    start_rank = infer_local_external_lb_start_rank(args)
+    start_rank = infer_multi_port_external_lb_start_rank(args)
     if start_rank + local_size > args.data_parallel_size:
         raise ValueError(
-            "Error: local supervised ranks would exceed --data-parallel-size"
+            "Error: multi-port supervised ranks would exceed --data-parallel-size"
         )
 
-    admin_port = args.data_parallel_admin_port
+    supervisor_port = args.data_parallel_supervisor_port
     child_port_min = args.port
     child_port_max = args.port + local_size - 1
-    if child_port_min <= admin_port <= child_port_max:
+    if child_port_min <= supervisor_port <= child_port_max:
         raise ValueError(
-            f"Error: --data-parallel-admin-port {admin_port} "
+            f"Error: --data-parallel-supervisor-port {supervisor_port} "
             f"overlaps with child rank ports {child_port_min}-{child_port_max}"
         )
 
 
-def build_local_external_lb_child_args(
+def build_multi_port_external_lb_child_args(
     args: argparse.Namespace, local_rank: int
 ) -> argparse.Namespace:
     child_args = copy.copy(args)
     child_args.port = args.port + local_rank
     child_args.data_parallel_rank = (
-        infer_local_external_lb_start_rank(args) + local_rank
+        infer_multi_port_external_lb_start_rank(args) + local_rank
     )
     child_args.data_parallel_start_rank = None
     child_args.data_parallel_size_local = 1
     child_args.data_parallel_external_lb = True
     child_args.data_parallel_hybrid_lb = False
-    child_args.data_parallel_local_external_lb = False
-    child_args.data_parallel_admin_port = None
+    child_args.data_parallel_multi_port_external_lb = False
+    child_args.data_parallel_supervisor_port = None
     child_args.api_server_count = 1
     return child_args
 
 
-def _build_local_external_lb_child_env(
+def _build_multi_port_external_lb_child_env(
     args: argparse.Namespace, local_rank: int
 ) -> dict[str, str]:
     # set visible devices for the child process
@@ -152,21 +154,23 @@ def _child_base_url(args: argparse.Namespace, port: int) -> str:
     return f"http://{host}:{port}"
 
 
-def _probe_endpoint(
-    args: argparse.Namespace, port: int, path: str
+async def _probe_endpoint(
+    session: aiohttp.ClientSession,
+    args: argparse.Namespace,
+    port: int,
+    path: str,
 ) -> tuple[bool, str | None]:
-    request = urllib.request.Request(_child_base_url(args, port) + path, method="GET")
     try:
-        with urllib.request.urlopen(request, timeout=HEALTHCHECK_TIMEOUT_S) as response:
-            return response.status == HTTPStatus.OK, None
-    except urllib.error.HTTPError as exc:
-        return False, f"HTTP {exc.code}"
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        async with session.get(_child_base_url(args, port) + path) as response:
+            if response.status == HTTPStatus.OK:
+                return True, None
+            return False, f"HTTP {response.status}"
+    except (aiohttp.ClientError, asyncio.TimeoutError, TimeoutError, OSError) as exc:
         return False, str(exc)
 
 
 @dataclass
-class LocalExternalLBChildStatus:
+class MultiPortExternalLBChildStatus:
     local_rank: int
     data_parallel_rank: int
     port: int
@@ -177,40 +181,31 @@ class LocalExternalLBChildStatus:
     last_error: str | None = None
 
 
-class LocalExternalLBState:
-    def __init__(self, children: list[LocalExternalLBChildStatus]):
-        self._lock = threading.Lock()
+class MultiPortExternalLBState:
+    def __init__(self, children: list[MultiPortExternalLBChildStatus]):
         self._children = children
         self._shutting_down = False
 
-    def update_children(self, children: list[LocalExternalLBChildStatus]) -> None:
-        with self._lock:
-            self._children = children
+    def update_children(self, children: list[MultiPortExternalLBChildStatus]) -> None:
+        self._children = children
 
     def begin_shutdown(self) -> None:
-        with self._lock:
-            self._shutting_down = True
+        self._shutting_down = True
 
     def is_healthy(self) -> bool:
-        with self._lock:
-            return not self._shutting_down and all(
-                child.healthy and child.exitcode is None for child in self._children
-            )
+        return not self._shutting_down and all(
+            child.healthy and child.exitcode is None for child in self._children
+        )
 
     def is_ready(self) -> bool:
-        with self._lock:
-            return not self._shutting_down and all(
-                child.ready and child.exitcode is None for child in self._children
-            )
+        return not self._shutting_down and all(
+            child.ready and child.exitcode is None for child in self._children
+        )
 
 
-class _LocalExternalLBUvicornServer(uvicorn.Server):
-    def install_signal_handlers(self) -> None:
-        # we have our own signal handlers so ban uvicorn's
-        return
-
-
-def _build_local_external_lb_admin_app(state: LocalExternalLBState) -> FastAPI:
+def _build_multi_port_external_lb_supervisor_app(
+    state: MultiPortExternalLBState,
+) -> FastAPI:
     app = FastAPI(openapi_url=None, docs_url=None, redoc_url=None)
 
     def _status_response(ok: bool) -> Response:
@@ -230,7 +225,7 @@ def _build_local_external_lb_admin_app(state: LocalExternalLBState) -> FastAPI:
     return app
 
 
-def _run_local_external_lb_child(
+def _run_multi_port_external_lb_child(
     child_args: argparse.Namespace, env_updates: dict[str, str]
 ) -> None:
     from vllm.entrypoints.openai.api_server import run_server
@@ -242,171 +237,223 @@ def _run_local_external_lb_child(
     uvloop.run(run_server(child_args))
 
 
-class LocalExternalLBSupervisor:
+class MultiPortExternalLBSupervisor:
     def __init__(self, args: argparse.Namespace):
-        validate_local_external_lb_args(args)
+        validate_multi_port_external_lb_args(args)
         self.args = args
-        self.admin_port = args.data_parallel_admin_port
+        self.supervisor_port = args.data_parallel_supervisor_port
         self.child_specs = [
-            LocalExternalLBChildStatus(
+            MultiPortExternalLBChildStatus(
                 local_rank=local_rank,
-                data_parallel_rank=infer_local_external_lb_start_rank(args)
+                data_parallel_rank=infer_multi_port_external_lb_start_rank(args)
                 + local_rank,
                 port=args.port + local_rank,
             )
             for local_rank in range(args.data_parallel_size_local)
         ]
-        self.state = LocalExternalLBState(copy.deepcopy(self.child_specs))
+        self.state = MultiPortExternalLBState(copy.deepcopy(self.child_specs))
         self.processes: list[BaseProcess] = []
-        self._stop_requested = threading.Event()
+        self._stop_requested = asyncio.Event()
         self._failed_process: BaseProcess | None = None
-        self._admin_server: _LocalExternalLBUvicornServer | None = None
-        self._admin_thread: threading.Thread | None = None
-        self._admin_server_error: BaseException | None = None
+        self._supervisor_server: uvicorn.Server | None = None
+        self._supervisor_server_task: asyncio.Task[None] | None = None
 
-    def run(self) -> None:
-        previous_handlers = {
-            sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)
-        }
-
-        def _handle_signal(signum, frame):
-            logger.info(
-                "Received signal %d, forwarding graceful termination to local "
-                "external LB child ranks",
-                signum,
-            )
-            self.state.begin_shutdown()
-            self._stop_requested.set()
-
-        signal.signal(signal.SIGTERM, _handle_signal)
-        signal.signal(signal.SIGINT, _handle_signal)
+    async def run(self) -> None:
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, partial(self._handle_signal, sig))
 
         try:
-            self._start_admin_server()
+            await self._start_supervisor_server()
             self._start_children()
-            self._monitor_children()
+            await self._monitor_children()
         finally:
             self.state.begin_shutdown()
             self._stop_requested.set()
-            self._shutdown_children()
-            self._shutdown_admin_server()
-            for sig, handler in previous_handlers.items():
-                signal.signal(sig, handler)
+            await self._shutdown_children()
+            await self._shutdown_supervisor_server()
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                loop.remove_signal_handler(sig)
 
         if self._failed_process is not None:
             raise RuntimeError(
-                f"Local external LB child exited unexpectedly: "
+                f"Multi-port external LB child exited unexpectedly: "
                 f"{self._failed_process.name} "
                 f"exit code {self._failed_process.exitcode}"
             )
 
-    def _start_admin_server(self) -> None:
+    def _handle_signal(self, signum: int) -> None:
+        if self._stop_requested.is_set():
+            return
+        logger.info(
+            "Received signal %d, forwarding graceful termination to "
+            "multi-port external LB child ranks",
+            signum,
+        )
+        self.state.begin_shutdown()
+        self._stop_requested.set()
+
+    async def _start_supervisor_server(self) -> None:
         host = self.args.host or "0.0.0.0"
-        app = _build_local_external_lb_admin_app(self.state)
+        app = _build_multi_port_external_lb_supervisor_app(self.state)
         config = uvicorn.Config(
             app,
             host=host,
-            port=self.admin_port,
+            port=self.supervisor_port,
             log_level=self.args.uvicorn_log_level,
             access_log=False,
         )
-        self._admin_server = _LocalExternalLBUvicornServer(config)
-        self._admin_thread = threading.Thread(
-            target=self._run_admin_server,
-            daemon=True,
-            name="local-external-lb-admin",
+        self._supervisor_server = uvicorn.Server(config)
+        self._supervisor_server_task = asyncio.create_task(
+            self._supervisor_server.serve(),
+            name="multi-port-external-lb-supervisor",
         )
-        self._admin_thread.start()
-        self._wait_for_admin_server_startup()
+        await self._wait_for_supervisor_server_startup()
         logger.info_once(
-            "Started local external LB admin server on %s:%d",
+            "Started multi-port external LB supervisor on %s:%d",
             host,
-            self.admin_port,
+            self.supervisor_port,
         )
 
-    def _run_admin_server(self) -> None:
-        assert self._admin_server is not None
-        try:
-            self._admin_server.run()
-        except BaseException as exc:
-            self._admin_server_error = exc
-
-    def _wait_for_admin_server_startup(self) -> None:
-        assert self._admin_server is not None and self._admin_thread is not None
-
+    async def _wait_for_supervisor_server_startup(self) -> None:
+        assert (
+            self._supervisor_server is not None
+            and self._supervisor_server_task is not None
+        )
         deadline = time.monotonic() + 60.0
-        while time.monotonic() < deadline:
-            if self._admin_server_error is not None:
+        while not self._supervisor_server.started:
+            if self._supervisor_server_task.done():
+                await self._raise_if_supervisor_server_stopped(
+                    "Multi-port external LB supervisor exited before startup"
+                )
+            if time.monotonic() >= deadline:
                 raise RuntimeError(
-                    "Failed to start local external LB admin server"
-                ) from self._admin_server_error
-            if self._admin_server.started:
-                return
-            if not self._admin_thread.is_alive():
-                break
-            time.sleep(1)
+                    "Timed out starting multi-port external LB supervisor"
+                )
+            await asyncio.sleep(0.05)
 
-        raise RuntimeError("Timed out starting local external LB admin server")
+    async def _raise_if_supervisor_server_stopped(self, message: str) -> None:
+        assert self._supervisor_server_task is not None
+        if not self._supervisor_server_task.done():
+            return
+        try:
+            await self._supervisor_server_task
+        except asyncio.CancelledError as exc:
+            raise RuntimeError(message) from exc
+        except Exception as exc:
+            raise RuntimeError(message) from exc
+        raise RuntimeError(message)
 
     def _start_children(self) -> None:
         context = multiprocessing.get_context("spawn")
         for local_rank in range(self.args.data_parallel_size_local):
-            child_args = build_local_external_lb_child_args(self.args, local_rank)
-            child_env = _build_local_external_lb_child_env(self.args, local_rank)
+            child_args = build_multi_port_external_lb_child_args(self.args, local_rank)
+            child_env = _build_multi_port_external_lb_child_env(self.args, local_rank)
             process = context.Process(
-                target=_run_local_external_lb_child,
+                target=_run_multi_port_external_lb_child,
                 name=f"ExternalLBRank_{child_args.data_parallel_rank}",
                 args=(child_args, child_env),
             )
             process.start()
             self.processes.append(process)
 
-    def _monitor_children(self) -> None:
-        while not self._stop_requested.is_set():
-            statuses: list[LocalExternalLBChildStatus] = []
-            for spec, process in zip(self.child_specs, self.processes):
-                status = copy.copy(spec)
-                status.pid = process.pid
-                status.exitcode = process.exitcode
+    async def _collect_child_status(
+        self,
+        session: aiohttp.ClientSession,
+        spec: MultiPortExternalLBChildStatus,
+        process: BaseProcess,
+    ) -> MultiPortExternalLBChildStatus:
+        status = copy.copy(spec)
+        status.pid = process.pid
+        status.exitcode = process.exitcode
 
-                if process.exitcode is not None:
-                    status.last_error = f"process exited with code {process.exitcode}"
-                    self._failed_process = process
-                else:
-                    status.healthy, status.last_error = _probe_endpoint(
-                        self.args, status.port, "/health"
+        if process.exitcode is not None:
+            status.last_error = f"process exited with code {process.exitcode}"
+            return status
+
+        status.healthy, status.last_error = await _probe_endpoint(
+            session, self.args, status.port, "/health"
+        )
+        if status.healthy:
+            status.ready, status.last_error = await _probe_endpoint(
+                session, self.args, status.port, "/v1/models"
+            )
+        return status
+
+    async def _monitor_children(self) -> None:
+        timeout = aiohttp.ClientTimeout(total=HEALTHCHECK_TIMEOUT_S)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            while not self._stop_requested.is_set():
+                await self._raise_if_supervisor_server_stopped(
+                    "Multi-port external LB supervisor exited unexpectedly"
+                )
+                statuses = await asyncio.gather(
+                    *(
+                        self._collect_child_status(session, spec, process)
+                        for spec, process in zip(self.child_specs, self.processes)
                     )
-                    if status.healthy:
-                        status.ready, status.last_error = _probe_endpoint(
-                            self.args, status.port, "/v1/models"
-                        )
+                )
+                self.state.update_children(statuses)
+                self._failed_process = next(
+                    (
+                        process
+                        for process in self.processes
+                        if process.exitcode is not None
+                    ),
+                    None,
+                )
+                if self._failed_process is not None:
+                    break
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(
+                        self._stop_requested.wait(),
+                        timeout=HEALTHCHECK_INTERVAL_S,
+                    )
 
-                statuses.append(status)
-
-            self.state.update_children(statuses)
-            if self._failed_process is not None:
-                break
-            if self._stop_requested.wait(HEALTHCHECK_INTERVAL_S):
-                break
-
-    def _shutdown_children(self) -> None:
+    async def _shutdown_children(self) -> None:
         if self.processes:
             logger.info(
-                "Forwarding SIGTERM to %d local external LB child processes",
+                "Forwarding SIGTERM to %d multi-port external LB child processes",
                 len(self.processes),
             )
-            shutdown_processes(self.processes, timeout=self.args.shutdown_timeout)
+            timeout = max(self.args.shutdown_timeout, 5.0)
+            deadline = time.monotonic() + timeout
+            for process in self.processes:
+                if process.is_alive():
+                    process.terminate()
+
+            while time.monotonic() < deadline:
+                alive = False
+                for process in self.processes:
+                    if not process.is_alive():
+                        continue
+                    alive = True
+                    process.join(timeout=0)
+                if not alive:
+                    break
+                await asyncio.sleep(0.1)
+
+            for process in self.processes:
+                if process.is_alive() and (pid := process.pid) is not None:
+                    kill_process_tree(pid)
             self.processes = []
 
-    def _shutdown_admin_server(self) -> None:
-        if self._admin_server is not None:
-            self._admin_server.should_exit = True
-        if self._admin_thread is not None:
-            self._admin_thread.join(timeout=5.0)
-        self._admin_server = None
-        self._admin_thread = None
-        self._admin_server_error = None
+    async def _shutdown_supervisor_server(self) -> None:
+        if self._supervisor_server is not None:
+            self._supervisor_server.should_exit = True
+        if (
+            self._supervisor_server_task is not None
+            and not self._supervisor_server_task.done()
+        ):
+            try:
+                await asyncio.wait_for(self._supervisor_server_task, timeout=5.0)
+            except asyncio.TimeoutError:
+                self._supervisor_server_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._supervisor_server_task
+        self._supervisor_server = None
+        self._supervisor_server_task = None
 
 
-def run_local_external_lb_supervisor(args: argparse.Namespace) -> None:
-    LocalExternalLBSupervisor(args).run()
+def run_multi_port_external_lb_supervisor(args: argparse.Namespace) -> None:
+    uvloop.run(MultiPortExternalLBSupervisor(args).run())
