@@ -779,7 +779,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     if [ "$INSTALL_KV_CONNECTORS" = "true" ]; then \
         # nixl metapackage ships with default nixl-cu12 (nixl<1.1.0). Explicitly strip nixl-cu13 
         # from the requirements on non-cu13 images to prevent it from shadowing the correct cu12 one.
-        if [ "$(echo $CUDA_VERSION | cut -d. -f1)" != "13" ]; then \
+        if [ "$CUDA_MAJOR" -lt 13 ]; then \
             sed -i '/^nixl-cu13/d' /tmp/kv_connectors.txt; \
         fi; \
         uv pip install --system -r /tmp/kv_connectors.txt --no-build || ( \
