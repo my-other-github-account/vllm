@@ -405,6 +405,15 @@ def has_deep_ep() -> bool:
     return _has_module("deep_ep")
 
 
+def has_deep_ep_v2() -> bool:
+    """Whether deep_ep with ElasticBuffer (v2 API) is available."""
+    if not _has_module("deep_ep"):
+        return False
+    import deep_ep  # type: ignore[import-not-found]
+
+    return hasattr(deep_ep, "ElasticBuffer")
+
+
 def has_deep_gemm() -> bool:
     """Whether the optional `deep_gemm` package is available.
 
