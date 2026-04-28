@@ -14,6 +14,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
     supports_hma,
 )
 from vllm.logger import init_logger
+from vllm.utils.func_utils import supports_kw
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -48,7 +49,7 @@ class KVConnectorFactory:
         kv_transfer_config = config.kv_transfer_config
         if kv_transfer_config is None:
             raise ValueError("kv_transfer_config must be set to create a connector")
-        connector_cls = cls._get_connector_class(kv_transfer_config)
+        connector_cls = cls.get_connector_class(kv_transfer_config)
 
         # check if the connector supports HMA
         hma_enabled = not config.scheduler_config.disable_hybrid_kv_cache_manager
@@ -92,7 +93,7 @@ class KVConnectorFactory:
         return cls._registry[connector_name]()
 
     @classmethod
-    def _get_connector_class(
+    def get_connector_class(
         cls, kv_transfer_config: "KVTransferConfig"
     ) -> type[KVConnectorBaseType]:
         connector_name = kv_transfer_config.kv_connector
@@ -111,18 +112,20 @@ class KVConnectorFactory:
                     f"Class {connector_name} not found in {connector_module_path}"
                 ) from e
             connector_cls = cast(type[KVConnectorBaseType], connector_cls)
+            if not supports_kw(connector_cls, "kv_cache_config"):
+                msg = (
+                    f"Connector {connector_cls.__name__} uses deprecated "
+                    "2-argument constructor signature. External v1 KV "
+                    "connectors must accept kv_cache_config as the third "
+                    "constructor argument and pass it to super().__init__()."
+                )
+                logger.error(msg)
+                raise ValueError(msg)
         elif connector_name in cls._registry:
             connector_cls = cls._registry[connector_name]()
         else:
             raise ValueError(f"Unsupported connector type: {connector_name}")
         return connector_cls
-
-    @classmethod
-    def get_connector_class(
-        cls, kv_transfer_config: "KVTransferConfig"
-    ) -> type[KVConnectorBaseType]:
-        """Get the connector class by name."""
-        return cls._get_connector_class(kv_transfer_config)
 
 
 # Register various connectors here.
