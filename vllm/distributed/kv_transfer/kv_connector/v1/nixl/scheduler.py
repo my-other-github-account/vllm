@@ -92,7 +92,7 @@ class NixlConnectorScheduler:
         if os.environ.get("VLLM_NIXL_ABORT_REQUEST_TIMEOUT") is not None:
             logger.warning(
                 "VLLM_NIXL_ABORT_REQUEST_TIMEOUT is deprecated and will be "
-                "removed in release 0.21.0."
+                "removed in release 0.22.0."
             )
 
         # Background thread for handling new handshake requests.
