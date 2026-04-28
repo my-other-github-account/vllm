@@ -109,6 +109,8 @@ class ExtractHiddenStatesProposer:
         stacked_hidden_states = torch.stack(target_hidden_states, dim=1)
         num_tokens = stacked_hidden_states.shape[0]
 
+        # R33: zero buffer first so padded/stale slots can't poison cache with NaN from prior requests
+        self.hidden_states.zero_()
         # Copy hidden states to buffer
         self.hidden_states[:num_tokens] = stacked_hidden_states
 
