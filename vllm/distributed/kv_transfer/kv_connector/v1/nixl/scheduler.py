@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Scheduler-side logic for the NIXL connector."""
 
+import os
 import threading
 import time
 from typing import TYPE_CHECKING, Any
@@ -87,6 +88,12 @@ class NixlConnectorScheduler:
         logger.info("Initializing NIXL Scheduler %s", engine_id)
         if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
             logger.info("Hybrid Memory Allocator is enabled with NIXL")
+
+        if os.environ.get("VLLM_NIXL_ABORT_REQUEST_TIMEOUT") is not None:
+            logger.warning(
+                "VLLM_NIXL_ABORT_REQUEST_TIMEOUT is deprecated and will be "
+                "removed in release 0.21.0."
+            )
 
         # Background thread for handling new handshake requests.
         self._nixl_handshake_listener_t: threading.Thread | None = None
