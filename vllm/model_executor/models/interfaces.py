@@ -1294,7 +1294,14 @@ class EagleModelMixin:
         residual: torch.Tensor,
     ) -> list[torch.Tensor]:
         if layer_idx in self.aux_hidden_state_layers:
-            value = hidden_states + residual if residual is not None else hidden_states
+            # R33 NaN-fix: fp32 sum prevents bf16 overflow on deep layers (e.g. MiniMax-M2.7 layers 60+) saturating NVFP4
+            if residual is not None:
+                value = (hidden_states.to(torch.float32) + residual.to(torch.float32)).to(hidden_states.dtype)
+            else:
+                value = hidden_states
+            # R33: nan-clamp guard — if any NaN/Inf escaped, replace with 0 (loss in that token but no cache poisoning)
+            if not value.isfinite().all():
+                value = torch.where(value.isfinite(), value, torch.zeros_like(value))
             aux_hidden_states.append(value)
         return aux_hidden_states
 
